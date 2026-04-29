@@ -83,7 +83,8 @@
         "Проверить, что все папки из структуры существуют (можно с .gitkeep)"
       ],
       "dependencies": [],
-      "status": "pending"
+      "status": "done",
+      "notes": "Next.js 16 (not 15) was already initialized by user in beatyourself/ subfolder. Completed: added Prettier + prettier-plugin-tailwindcss + eslint-config-prettier, scripts (lint/format/format:check/typecheck), full folder structure with .gitkeep, prisma/migrations/dev .gitignore entry, project README, turbopack.root config to silence multi-lockfile warning. All checks pass: npm run lint, npm run typecheck, npm run format:check, npm run build, npm run dev (HTTP 200 on /)."
     },
     {
       "id": "TASK-002",

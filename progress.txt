@@ -1,0 +1,60 @@
+# Progress notes (plain text log)
+
+## 2026-04-29 — TASK-001: Next.js project init
+
+Status: done
+
+What was already in place when I started:
+- Next.js 16.2.4 (NOT 15 — see beatyourself/AGENTS.md: "This is NOT the Next.js you know")
+- React 19.2.4, TypeScript 5 strict, Tailwind v4, ESLint 9 + eslint-config-next
+- app/layout.tsx, app/page.tsx, app/globals.css (default create-next-app template)
+- .env.example at repo root, .env.local present and gitignored at repo root
+- The Next.js project lives in beatyourself/ subfolder, NOT at repo root
+- node_modules/next/dist/docs/ has Next 16 docs — read these before writing code
+- AGENTS.md / CLAUDE.md inside beatyourself/ flag the Next 16 difference
+
+What I added in this iteration:
+- Installed prettier, prettier-plugin-tailwindcss, eslint-config-prettier
+- .prettierrc.json (semi, double quotes, trailing comma all, printWidth 100, tailwind plugin)
+- .prettierignore (ignores node_modules, .next, build artifacts, AGENTS.md, CLAUDE.md)
+- eslint.config.mjs: appended `prettier` config to disable conflicting rules
+- package.json scripts: format, format:check, typecheck (lint already existed)
+- Full folder structure inside beatyourself/ with .gitkeep:
+  app/(auth)/login, app/(app)/{dashboard,challenges,water,weight,profile},
+  app/api/{auth,strava,cron}, lib/{db,auth,services,strava,crypto,validation,utils},
+  actions, components/{ui,features,layout}, prisma, config
+- beatyourself/.gitignore: added /prisma/migrations/dev/
+- beatyourself/README.md: rewrote with stack, folder structure, scripts, conventions
+- beatyourself/next.config.ts: added turbopack.root = __dirname to silence multi-lockfile warning
+
+Verification (all pass):
+- npm run lint            -> clean
+- npm run typecheck       -> clean
+- npm run format:check    -> clean
+- npm run build           -> ✓ static / and /_not-found
+- npm run dev + curl /    -> HTTP 200
+
+## Notes for next iterations
+
+- Project root for all `npm` / Next commands is beatyourself/, not repo root.
+- The Python toolchain mentioned in the user prompt (`uv run ruff check`, `uv run pytest`) does
+  NOT apply — this is a TS/Next.js project. Use npm run lint / typecheck / format:check / build.
+- `tasks.json.tech_stack_reference.framework` says "Next.js 15" but reality is Next.js 16.
+  Don't downgrade. Read node_modules/next/dist/docs/ for current API conventions.
+- Repo-root README.md was already deleted by the user before this iteration (visible in
+  git status). Project README now lives at beatyourself/README.md. Don't restore the old one.
+- AGENTS.md / CLAUDE.md inside beatyourself/ are owned by the user — kept out of Prettier
+  formatting via .prettierignore so future iterations don't accidentally rewrite them.
+- For TASK-002 (shadcn/ui), shadcn `init` will likely want to modify globals.css, tsconfig
+  paths, and add components.json. Plan to run it from beatyourself/.
+- For TASK-003 (zod env), env files are at REPO ROOT (../ from beatyourself/), not inside
+  beatyourself/. Decide whether config/env.ts should load from process.env (Next handles
+  loading .env.local automatically only from project root, which is beatyourself/). May need
+  to either move .env.local into beatyourself/ or add a custom loader. Currently .env.local
+  is at /Users/lyaris/Documents/Projects/BeatYourself/.env.local — Next won't auto-load it.
+
+## Open follow-ups (do NOT silently fix in unrelated tasks)
+
+- Decide canonical location for .env.local (repo root vs beatyourself/). Affects TASK-003.
+- The repo-root .gitignore has only `.env.local`. If env files move into beatyourself/, the
+  beatyourself/.gitignore already handles `.env*`.
