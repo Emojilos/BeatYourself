@@ -1,0 +1,896 @@
+{
+  "agent_instructions": {
+    "before_start": [
+      "Прочитай этот файл и git log --oneline -20",
+      "Прочитай progress.md, чтобы понять, что уже сделано",
+      "Выбери ОДНУ задачу со статусом pending и наивысшим приоритетом (critical > high > medium > low)",
+      "Проверь, что ВСЕ задачи из dependencies имеют статус done",
+      "Если зависимости не выполнены — выбери другую задачу или сообщи пользователю"
+    ],
+    "during_work": [
+      "Работай только над выбранной задачей",
+      "Делай атомарные коммиты после каждого логического изменения с понятными сообщениями",
+      "Не трогай код, не связанный с текущей задачей (никакого 'попутного рефакторинга')",
+      "Если по ходу работы обнаружишь, что задача требует изменений в зависимостях — НЕ меняй их, а добавь запись в progress.md и сообщи пользователю",
+      "Если задача требует переменных окружения — добавь их в .env.example с placeholder-значениями"
+    ],
+    "before_finish": [
+      "Выполни ВСЕ test_steps из задачи end-to-end (не только unit-тесты — реальная проверка)",
+      "Меняй status на 'done' ТОЛЬКО после успешного прохождения всех test_steps",
+      "Допиши блок в progress.md: дата, ID задачи, что сделано, какие коммиты, проблемы/решения",
+      "ЗАПРЕЩЕНО удалять задачи. ЗАПРЕЩЕНО редактировать description, acceptance_criteria, test_steps, dependencies — только status и опционально notes",
+      "Если обнаружил пропущенную задачу — добавь новую с ID TASK-NNN в конец массива, не меняй существующие"
+    ],
+    "status_values": ["pending", "in_progress", "done", "blocked"],
+    "tech_stack_reference": {
+      "framework": "Next.js 15 (App Router) + TypeScript",
+      "styling": "Tailwind CSS + shadcn/ui",
+      "db": "PostgreSQL (Neon) + Prisma ORM",
+      "auth": "NextAuth v5 (Auth.js) + Google OAuth",
+      "animations": "Framer Motion",
+      "charts": "Recharts",
+      "icons": "lucide-react",
+      "deploy": "Render + Neon + UptimeRobot",
+      "monitoring": "Sentry"
+    },
+    "folder_structure": {
+      "app/(auth)/login": "страница входа",
+      "app/(app)/{dashboard,challenges,water,weight,profile}": "защищённые страницы",
+      "app/api/{auth,strava,cron}": "route handlers только для OAuth callbacks, webhooks, cron",
+      "lib/db": "Prisma client singleton",
+      "lib/auth": "NextAuth config + whitelist + session helpers",
+      "lib/services": "domain services (challenges, activities, streaks, water, weight, strava)",
+      "lib/strava": "API client + token cipher + normalizer",
+      "lib/crypto": "AES-GCM wrapper",
+      "lib/validation": "zod schemas (shared client+server)",
+      "lib/utils": "date/format helpers (timezone-aware)",
+      "actions": "server actions — тонкие обёртки над services",
+      "components/ui": "shadcn primitives",
+      "components/features": "ChallengeCard, Heatmap, WaterRing и т.д.",
+      "components/layout": "навигация, layouts",
+      "prisma": "schema.prisma, migrations, seed.ts",
+      "config": "env.ts (zod-validated), constants"
+    },
+    "architectural_principles": [
+      "Server actions — основной путь для мутаций. /api/* — только для Strava callbacks, webhooks, cron",
+      "Тонкий service layer: services вызывают Prisma напрямую, без репозиториев",
+      "НЕ использовать: DI containers, repository pattern, event bus, CQRS, tRPC, Storybook, monorepo, feature flags, BaseService",
+      "Тесты пишем ТОЛЬКО для streak calculation и token crypto. CRUD не покрываем unit-тестами",
+      "Streak/heatmap логика — pure functions в lib/services/streaks.ts, принимают (activities[], userTz)",
+      "Whitelist email — в NextAuth signIn callback, не в middleware (fail closed)"
+    ]
+  },
+  "tasks": [
+    {
+      "id": "TASK-001",
+      "category": "infrastructure",
+      "priority": "critical",
+      "description": "Инициализация Next.js 15 проекта с TypeScript, Tailwind CSS, ESLint, Prettier и базовой структурой папок",
+      "acceptance_criteria": [
+        "Создан Next.js 15 проект с App Router и TypeScript (strict mode)",
+        "Настроен Tailwind CSS v4 с базовой конфигурацией",
+        "Настроены ESLint и Prettier с интеграцией",
+        "Создана структура папок: app/(auth), app/(app), app/api, lib/{db,auth,services,strava,crypto,validation,utils}, actions, components/{ui,features,layout}, prisma, config",
+        "Создан .gitignore с node_modules, .env, .next, prisma/migrations/dev",
+        "Создан README.md с краткой инструкцией по запуску",
+        "Инициализирован git-репозиторий с первым коммитом"
+      ],
+      "test_steps": [
+        "Запустить npm install — без ошибок",
+        "Запустить npm run dev — сервер стартует на localhost:3000",
+        "Открыть localhost:3000 — отображается дефолтная страница без ошибок в консоли",
+        "Запустить npm run lint — проходит без ошибок",
+        "Проверить, что все папки из структуры существуют (можно с .gitkeep)"
+      ],
+      "dependencies": [],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-002",
+      "category": "infrastructure",
+      "priority": "critical",
+      "description": "Установка и настройка shadcn/ui с базовой темой в стиле Claude.ai (тёплые серые тона, минимализм)",
+      "acceptance_criteria": [
+        "shadcn/ui инициализирован через npx shadcn init",
+        "Установлены базовые компоненты: button, input, label, card, dialog, sheet, badge, progress, tabs, dropdown-menu, toast, form",
+        "Настроена цветовая палитра: фон #f7f7f5 (warm gray), акцент #C96442 (terracotta) или нейтральный графитовый",
+        "Подключён шрифт Inter или Geist через next/font",
+        "Настроены CSS-переменные для светлой темы (тёмная — позже в v1.1)",
+        "Углы карточек 8-12px, кнопки 6px, мягкие границы #e5e5e5"
+      ],
+      "test_steps": [
+        "Создать тестовую страницу с кнопкой, карточкой, инпутом — все рендерятся корректно",
+        "Проверить, что цвета, шрифты, скругления соответствуют референсу Claude.ai",
+        "Проверить отзывчивость компонентов (hover, focus, disabled)"
+      ],
+      "dependencies": ["TASK-001"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-003",
+      "category": "infrastructure",
+      "priority": "critical",
+      "description": "Создание config/env.ts с zod-валидацией всех переменных окружения",
+      "acceptance_criteria": [
+        "config/env.ts использует zod для валидации process.env при старте",
+        "Валидируются: DATABASE_URL, NEXTAUTH_SECRET, NEXTAUTH_URL, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, ALLOWED_EMAIL, STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET, ENCRYPTION_KEY, CRON_SECRET, SENTRY_DSN (последние 6 — optional на этом этапе)",
+        "Экспортируется типизированный объект env",
+        "При невалидных env приложение падает на старте с понятной ошибкой",
+        "Создан .env.example со всеми переменными и placeholder-значениями"
+      ],
+      "test_steps": [
+        "Удалить DATABASE_URL из .env.local — npm run dev падает с ошибкой про missing DATABASE_URL",
+        "Установить невалидный URL — падает с ошибкой валидации",
+        "Импортировать env в любом server-файле — TypeScript видит типы"
+      ],
+      "dependencies": ["TASK-001"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-004",
+      "category": "infrastructure",
+      "priority": "critical",
+      "description": "Настройка Prisma и создание полной schema.prisma со всеми сущностями",
+      "acceptance_criteria": [
+        "Установлен Prisma + @prisma/client",
+        "schema.prisma содержит модели: User, UserSettings, Challenge, Activity, WaterLog, WeightLog, StravaIntegration",
+        "Все поля типов соответствуют PRD разделам 5.2 (User, UserSettings, Challenge, Activity, WaterLog, WeightLog, StravaIntegration)",
+        "Все enum определены: ChallengeType (single_day, cumulative), Metric (steps, distance_km, duration_min, runs_count, custom), Difficulty (easy, medium, hard), ChallengeStatus (active, completed, failed, archived), ActivitySource (manual, strava), ActivityType (run, walk, other), Theme (light, dark), AuthProvider (google, github)",
+        "Релейшены: User 1:N Challenge/Activity/WaterLog/WeightLog, User 1:1 UserSettings, User 1:0..1 StravaIntegration",
+        "Индексы: (userId, activityDate), (externalId, source) UNIQUE, (userId, loggedAt), (userId, status)",
+        "Создана начальная миграция: npx prisma migrate dev --name init"
+      ],
+      "test_steps": [
+        "Запустить npx prisma migrate dev — миграция применяется без ошибок",
+        "Запустить npx prisma studio — открывается UI с пустыми таблицами",
+        "Запустить npx prisma generate — клиент генерируется без ошибок",
+        "Импортировать PrismaClient в TS-файле — типы доступны для всех моделей"
+      ],
+      "dependencies": ["TASK-003"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-005",
+      "category": "infrastructure",
+      "priority": "critical",
+      "description": "Создание Prisma client singleton в lib/db/prisma.ts",
+      "acceptance_criteria": [
+        "lib/db/prisma.ts экспортирует singleton PrismaClient (с globalThis-обёрткой для dev hot-reload)",
+        "В production создаётся новый экземпляр",
+        "В dev клиент кешируется на globalThis для предотвращения утечки коннектов при HMR"
+      ],
+      "test_steps": [
+        "Импортировать prisma в server-файле, выполнить prisma.user.findMany() — возвращает []",
+        "Перезапустить dev-сервер несколько раз — нет варнингов про множественные PrismaClient instances"
+      ],
+      "dependencies": ["TASK-004"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-006",
+      "category": "security",
+      "priority": "critical",
+      "description": "AES-256-GCM crypto-утилита в lib/crypto для шифрования Strava токенов с unit-тестами",
+      "acceptance_criteria": [
+        "lib/crypto/cipher.ts экспортирует encrypt(plaintext): string и decrypt(ciphertext): string",
+        "Используется AES-256-GCM из Node crypto",
+        "Ключ берётся из env.ENCRYPTION_KEY (32 байта в hex или base64)",
+        "Каждое шифрование генерирует уникальный IV (12 байт) и сохраняется в формате iv:authTag:ciphertext (base64)",
+        "Decrypt валидирует authTag и бросает ошибку при tampering",
+        "Написаны unit-тесты (vitest или jest): round-trip encrypt/decrypt, разные plaintext дают разные ciphertext, испорченный ciphertext бросает ошибку"
+      ],
+      "test_steps": [
+        "Запустить тесты — все проходят",
+        "В REPL/тестовом скрипте: encrypt('hello').decrypt() === 'hello'",
+        "Изменить один символ в ciphertext — decrypt бросает исключение",
+        "Encrypt одного и того же значения дважды — два разных ciphertext (разные IV)"
+      ],
+      "dependencies": ["TASK-003"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-007",
+      "category": "security",
+      "priority": "critical",
+      "description": "Настройка NextAuth v5 с Google OAuth и email whitelist в signIn callback",
+      "acceptance_criteria": [
+        "Установлен next-auth@5 (Auth.js)",
+        "lib/auth/config.ts содержит NextAuth конфиг с Google провайдером",
+        "В signIn callback проверка: profile.email === env.ALLOWED_EMAIL → true, иначе false (fail closed)",
+        "Сессия хранится в JWT (для простоты на free tier)",
+        "Сессия живёт минимум 30 дней (maxAge: 60*60*24*30)",
+        "Создан route handler app/api/auth/[...nextauth]/route.ts",
+        "При первом входе создаётся User в БД (через Prisma adapter ИЛИ ручная upsert в signIn)",
+        "Создаётся UserSettings с дефолтами при создании User"
+      ],
+      "test_steps": [
+        "Открыть /api/auth/signin — редирект на Google OAuth",
+        "Войти с whitelist-email — успешно, создан User и UserSettings в БД",
+        "Войти с НЕ-whitelist-email — отказ в доступе, возврат на login",
+        "Проверить, что cookie httpOnly, secure (в проде), sameSite=lax",
+        "Перезагрузить браузер — сессия сохраняется"
+      ],
+      "dependencies": ["TASK-005"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-008",
+      "category": "security",
+      "priority": "critical",
+      "description": "Защищённый layout group app/(app) с проверкой сессии и редиректом на login",
+      "acceptance_criteria": [
+        "app/(app)/layout.tsx проверяет сессию через auth() — при отсутствии редирект на /login",
+        "Создан app/(auth)/login/page.tsx с кнопкой 'Войти через Google'",
+        "lib/auth/session.ts экспортирует getSession() и requireSession() helpers",
+        "Все будущие страницы внутри app/(app)/* автоматически защищены"
+      ],
+      "test_steps": [
+        "Открыть /dashboard без сессии — редирект на /login",
+        "Войти через Google — редирект обратно на /dashboard",
+        "Открыть /login будучи залогиненным — редирект на /dashboard"
+      ],
+      "dependencies": ["TASK-007"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-009",
+      "category": "ui",
+      "priority": "high",
+      "description": "Адаптивная навигация: bottom nav для mobile, sidebar для desktop",
+      "acceptance_criteria": [
+        "components/layout/BottomNav.tsx — фиксированная нижняя навигация для < 1024px с 5 пунктами: Главная, Челленджи, Вода, Вес, Профиль (lucide-react иконки)",
+        "components/layout/Sidebar.tsx — sidebar для >= 1024px с теми же пунктами + быстрый доступ к настройкам",
+        "Активный пункт подсвечивается акцентным цветом",
+        "Используется Next.js Link и usePathname для определения активного маршрута",
+        "Bottom nav имеет safe-area padding для iPhone (env(safe-area-inset-bottom))"
+      ],
+      "test_steps": [
+        "Открыть в browser dev tools mobile viewport (375px) — отображается bottom nav, sidebar скрыт",
+        "Переключить на desktop (1280px) — отображается sidebar, bottom nav скрыт",
+        "Кликнуть на каждый пункт — переход и подсветка активного",
+        "Проверить на реальном iPhone safe-area padding"
+      ],
+      "dependencies": ["TASK-008"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-010",
+      "category": "functional",
+      "priority": "high",
+      "description": "Zod-схемы и TypeScript типы для Challenge в lib/validation/challenge.ts",
+      "acceptance_criteria": [
+        "createChallengeSchema: title (1-100), description (0-500), type, metric, targetValue (>0), unit (1-20), difficulty, startDate, endDate (>= startDate), color (hex, опц), icon (опц)",
+        "updateChallengeSchema: только редактируемые поля (description, endDate, color, icon, status)",
+        "Запрещено менять metric и targetValue после создания (отсутствуют в updateChallengeSchema)",
+        "Экспортируются inferred TS типы: CreateChallengeInput, UpdateChallengeInput",
+        "Схемы используются как на клиенте (форма), так и на сервере (action)"
+      ],
+      "test_steps": [
+        "Импортировать схемы в test-файле, проверить parse валидных и невалидных данных",
+        "endDate < startDate → схема отклоняет",
+        "targetValue = 0 → отклоняет",
+        "title пустой → отклоняет"
+      ],
+      "dependencies": ["TASK-004"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-011",
+      "category": "functional",
+      "priority": "high",
+      "description": "Service layer для Challenge: lib/services/challenges.ts (CRUD)",
+      "acceptance_criteria": [
+        "Функции: createChallenge(userId, input), updateChallenge(userId, id, input), getChallenge(userId, id), listChallenges(userId, { status?, year? }), deleteChallenge(userId, id)",
+        "Все функции принимают userId первым параметром и фильтруют по нему (защита от IDOR)",
+        "createChallenge устанавливает status='active' и created_at",
+        "Все функции вызывают Prisma напрямую (без репозиториев)",
+        "Возврат типизированный (используем Prisma generated types)"
+      ],
+      "test_steps": [
+        "Через скрипт или Prisma Studio: создать User, вызвать createChallenge — запись появляется",
+        "listChallenges с фильтром status='active' — возвращает только активные",
+        "updateChallenge с чужим userId — возвращает null/throws (запись не найдена)",
+        "deleteChallenge — запись удаляется"
+      ],
+      "dependencies": ["TASK-010", "TASK-005"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-012",
+      "category": "functional",
+      "priority": "high",
+      "description": "Server actions для Challenge в actions/challenges.ts",
+      "acceptance_criteria": [
+        "Файл начинается с 'use server'",
+        "Экспортируются: createChallengeAction, updateChallengeAction, deleteChallengeAction",
+        "Каждый action вызывает requireSession() → парсит input через zod схему → вызывает service",
+        "Возвращают { success: true, data } | { success: false, error }",
+        "После мутаций вызывают revalidatePath('/challenges') и/или revalidatePath('/dashboard')"
+      ],
+      "test_steps": [
+        "Из тестовой формы вызвать createChallengeAction с валидными данными — челлендж создан, страница ревалидирована",
+        "Без сессии — action бросает unauthorized",
+        "С невалидными данными — возвращает { success: false, error }"
+      ],
+      "dependencies": ["TASK-011", "TASK-008"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-013",
+      "category": "ui",
+      "priority": "high",
+      "description": "Страница списка челленджей app/(app)/challenges/page.tsx с табами active/archive",
+      "acceptance_criteria": [
+        "Server component, загружает челленджи через listChallenges service",
+        "Табы: 'Активные' / 'Архив' (shadcn tabs)",
+        "Карточка челленджа: title, прогресс-бар (placeholder, точный progress в TASK-019), targetValue + unit, дней до дедлайна, badge difficulty",
+        "Кнопка 'Создать челлендж' открывает /challenges/new",
+        "Empty state: 'Пока нет челленджей. Поставь первую цель!'"
+      ],
+      "test_steps": [
+        "Открыть /challenges с пустой БД — отображается empty state",
+        "Создать челлендж напрямую в Prisma Studio → перезагрузить → карточка отображается",
+        "Переключить табы — фильтрация работает"
+      ],
+      "dependencies": ["TASK-012", "TASK-009"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-014",
+      "category": "ui",
+      "priority": "high",
+      "description": "Форма создания челленджа /challenges/new с полным набором полей",
+      "acceptance_criteria": [
+        "app/(app)/challenges/new/page.tsx с формой react-hook-form + zod resolver",
+        "Поля: title, description, type (radio: single_day/cumulative), metric (select), targetValue, unit (auto-fill по metric), difficulty (radio с цветами), startDate (default today), endDate, color picker (опц), icon picker из lucide-react (опц)",
+        "При submit вызывает createChallengeAction",
+        "При успехе — редирект на /challenges/[id] или /challenges",
+        "При ошибке — toast с сообщением",
+        "Превью карточки в правой колонке (на desktop)"
+      ],
+      "test_steps": [
+        "Заполнить форму валидными данными → submit → создан в БД → редирект",
+        "Оставить title пустым → ошибка валидации не даёт submit",
+        "Выбрать metric=distance_km → unit auto-fill 'км'",
+        "Выбрать endDate < startDate → ошибка"
+      ],
+      "dependencies": ["TASK-013"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-015",
+      "category": "ui",
+      "priority": "medium",
+      "description": "Страница редактирования челленджа /challenges/[id]/edit",
+      "acceptance_criteria": [
+        "Доступны для редактирования: description, endDate, color, icon, status (можно архивировать)",
+        "Поля metric, targetValue, type, startDate — read-only (отображаются, но disabled)",
+        "Кнопка 'Удалить челлендж' с confirm-диалогом",
+        "При успехе редирект на /challenges/[id]"
+      ],
+      "test_steps": [
+        "Открыть страницу — поля заполнены текущими значениями",
+        "Изменить description, submit — изменения сохранены",
+        "Попытаться через DevTools отправить targetValue в action — отклоняется zod-схемой",
+        "Удалить челлендж — подтверждение → удаление → редирект на /challenges"
+      ],
+      "dependencies": ["TASK-014"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-016",
+      "category": "functional",
+      "priority": "high",
+      "description": "Zod-схемы и типы для Activity в lib/validation/activity.ts",
+      "acceptance_criteria": [
+        "createActivitySchema: activityType, distanceKm (>=0, опц), durationMin (>=0, опц), steps (>=0, опц), activityDate (default today), note (опц, max 500)",
+        "Хотя бы одно из distanceKm/durationMin/steps должно быть > 0 (refine)",
+        "updateActivitySchema аналогично",
+        "Inferred типы экспортируются"
+      ],
+      "test_steps": [
+        "parse({}) → ошибка (нет ни одной метрики)",
+        "parse({ activityType: 'run', distanceKm: 5 }) → валидно",
+        "parse({ ..., note: 'a'.repeat(501) }) → ошибка"
+      ],
+      "dependencies": ["TASK-004"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-017",
+      "category": "functional",
+      "priority": "high",
+      "description": "Service для Activity: lib/services/activities.ts (CRUD + дедупликация по external_id)",
+      "acceptance_criteria": [
+        "Функции: createActivity(userId, input, source='manual'), createStravaActivity(userId, stravaData) — с upsert по (externalId, source), updateActivity, deleteActivity, listActivities(userId, { from?, to?, source? })",
+        "createStravaActivity использует Prisma upsert по unique constraint (externalId, source) для предотвращения дубликатов",
+        "После create/update/delete вызывается recalculateChallengeProgress(userId) — пересчёт всех активных челленджей пользователя"
+      ],
+      "test_steps": [
+        "createActivity вручную — запись появилась",
+        "createStravaActivity дважды с одним external_id — только одна запись",
+        "deleteActivity — запись удалена",
+        "После create — прогресс активных челленджей обновлён"
+      ],
+      "dependencies": ["TASK-016", "TASK-019"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-018",
+      "category": "ui",
+      "priority": "high",
+      "description": "Форма ручного ввода активности (модалка/bottom sheet + полная страница)",
+      "acceptance_criteria": [
+        "components/features/ActivityForm.tsx — переиспользуемая форма",
+        "На mobile открывается через shadcn Sheet (bottom sheet)",
+        "На desktop — Dialog по центру",
+        "Поля: activityType (run/walk/other), distanceKm, durationMin, steps, activityDate, note",
+        "Auto-calc темпа (мин/км) при заполнении distance + duration — отображается под полями",
+        "Кнопка 'Сохранить' вызывает createActivityAction (server action)",
+        "После успеха — закрыть модалку, toast 'Активность добавлена', revalidate dashboard и challenges"
+      ],
+      "test_steps": [
+        "На /dashboard кликнуть 'Добавить активность' (placeholder в TASK-024) — открывается форма",
+        "Заполнить и сохранить — toast, форма закрывается, активность в БД",
+        "Заполнить distance=5 duration=30 — отображается темп 6:00 мин/км",
+        "Submit без метрик — ошибка"
+      ],
+      "dependencies": ["TASK-017", "TASK-009"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-019",
+      "category": "functional",
+      "priority": "critical",
+      "description": "Сервис подсчёта прогресса челленджа в lib/services/challenge-progress.ts",
+      "acceptance_criteria": [
+        "calculateProgress(challenge, activities): возвращает текущее значение по метрике",
+        "Для type='single_day': MAX(SUM по дням) внутри [startDate, endDate]",
+        "Для type='cumulative': SUM всех activities внутри [startDate, endDate] по полю metric",
+        "Маппинг metric → activity field: steps→steps, distance_km→distanceKm, duration_min→durationMin, runs_count→COUNT activities WHERE activityType=run",
+        "recalculateChallengeProgress(userId): обновляет current_value для всех активных челленджей пользователя",
+        "Если current_value >= target_value → status='completed', completed_at=now()",
+        "Чистые функции — принимают данные, не делают I/O сами (для тестируемости)",
+        "Написаны unit-тесты для обоих типов челленджей и всех метрик, граничных дат"
+      ],
+      "test_steps": [
+        "Тест: cumulative challenge 100km, активности на 30+40+35 — current_value=105, completed",
+        "Тест: single_day 50000 шагов, активности 30k+25k в один день и 10k во второй — current=55000, completed",
+        "Тест: активность вне периода [start,end] — не учитывается",
+        "Тест: runs_count — считаются только activityType='run'"
+      ],
+      "dependencies": ["TASK-011"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-020",
+      "category": "functional",
+      "priority": "high",
+      "description": "Cron-эндпоинт для перевода просроченных челленджей в status='failed'",
+      "acceptance_criteria": [
+        "app/api/cron/check-deadlines/route.ts — POST endpoint с проверкой Bearer ${CRON_SECRET}",
+        "Находит все challenges WHERE status='active' AND endDate < CURRENT_DATE AND current_value < target_value",
+        "Обновляет их status='failed'",
+        "Возвращает { processed: N }",
+        "Идемпотентен (повторный вызов не делает ничего)"
+      ],
+      "test_steps": [
+        "Создать челлендж с endDate=вчера и недостигнутой целью",
+        "POST /api/cron/check-deadlines с Bearer токеном — статус changes на failed, response { processed: 1 }",
+        "Повторный вызов — { processed: 0 }",
+        "Без Bearer токена — 401"
+      ],
+      "dependencies": ["TASK-019", "TASK-003"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-021",
+      "category": "functional",
+      "priority": "critical",
+      "description": "Сервис подсчёта streak в lib/services/streaks.ts (timezone-aware)",
+      "acceptance_criteria": [
+        "calculateStreak(activities, userTz='Europe/Moscow'): { current: number, longest: number }",
+        "Активный день = день с >= 1 активностью (любой источник)",
+        "Текущий streak: считаем подряд идущие дни от сегодня (или вчера, если сегодня нет активности — grace period)",
+        "Грейс-период: если сегодня ещё нет активности, current = streak до вчера; если вчера тоже нет — current=0",
+        "longest: максимальная длина серии за всю историю",
+        "Чистая функция, принимает массив activities",
+        "Использует date-fns-tz для корректных timezone границ (день начинается/заканчивается в timezone пользователя)",
+        "Unit-тесты: пустой массив → 0/0; одна активность сегодня → 1/1; 3 дня подряд → 3/3; пропуск посередине → текущий стрик меньше longest; смена месяца/года; смена timezone"
+      ],
+      "test_steps": [
+        "Все unit-тесты проходят",
+        "Активности в дни 26.04, 27.04, 28.04, 29.04 (сегодня 29.04 MSK) → current=4",
+        "Активности 26.04, 27.04, 29.04 (пропуск 28.04) → current=1, longest=2"
+      ],
+      "dependencies": ["TASK-005"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-022",
+      "category": "integration",
+      "priority": "high",
+      "description": "Dashboard aggregation: server function getDashboardData() в lib/services/dashboard.ts",
+      "acceptance_criteria": [
+        "Возвращает { streak: { current, longest }, activeChallenges: [...], heatmapData: [{date, count}], recentAchievements: Challenge[5], waterToday: { consumed, goal }, weightLatest: { value, delta } }",
+        "Один вызов делает все необходимые DB-запросы (можно через Promise.all)",
+        "Heatmap данные за последние 90 дней (mobile) или 365 (desktop) — параметр функции",
+        "recentAchievements — последние 5 completed челленджей"
+      ],
+      "test_steps": [
+        "Из dashboard page вызвать getDashboardData(userId) — возвращается полная структура",
+        "С пустой БД — все массивы пустые, числовые поля 0",
+        "Замерить время выполнения — < 200ms на маленькой БД"
+      ],
+      "dependencies": ["TASK-021", "TASK-019", "TASK-027", "TASK-029"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-023",
+      "category": "ui",
+      "priority": "high",
+      "description": "Streak-блок на дашборде с иконкой огня и анимацией",
+      "acceptance_criteria": [
+        "components/features/StreakBlock.tsx — крупная карточка с числом дней и иконкой Flame из lucide-react",
+        "Подпись: 'дней подряд'",
+        "Под основным числом: '🏆 Лучший: N дней'",
+        "При current > 0: анимация лёгкой пульсации иконки (Framer Motion)",
+        "При current = 0: серый цвет, мотивирующая подпись 'Начни сегодня!'",
+        "Top-блок дашборда (приоритет 1)"
+      ],
+      "test_steps": [
+        "Открыть /dashboard со streak=5 — отображается 5 с пульсацией",
+        "Streak=0 — серый, подпись 'Начни сегодня!'",
+        "На mobile блок занимает всю ширину, шрифт читаемый"
+      ],
+      "dependencies": ["TASK-022"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-024",
+      "category": "ui",
+      "priority": "high",
+      "description": "Блок активных челленджей на дашборде с прогресс-барами и анимацией",
+      "acceptance_criteria": [
+        "components/features/ActiveChallengesList.tsx — список карточек активных челленджей",
+        "Карточка: title, прогресс-бар (Framer Motion animated 200-400ms), 'X из Y unit', дней до дедлайна, badge difficulty (зелёный/жёлтый/красный)",
+        "Тап на карточку → /challenges/[id]",
+        "Empty state: 'Нет активных челленджей. Создать?'",
+        "На mobile — 1 колонка, на desktop — 2-3 колонки"
+      ],
+      "test_steps": [
+        "Создать 2 челленджа разной difficulty — отображаются с разными цветами badges",
+        "Прогресс-бары анимируются при первой загрузке",
+        "Empty state при отсутствии активных",
+        "Тап → переход на детальную страницу"
+      ],
+      "dependencies": ["TASK-022"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-025",
+      "category": "ui",
+      "priority": "high",
+      "description": "Быстрый ввод активности с дашборда (кнопка → форма из TASK-018)",
+      "acceptance_criteria": [
+        "Большая кнопка '+ Добавить активность' под streak (mobile-first, в зоне доступа большого пальца)",
+        "Открывает Sheet/Dialog с ActivityForm (TASK-018)",
+        "После сохранения — обновление streak и прогресса челленджей (revalidatePath)"
+      ],
+      "test_steps": [
+        "Кликнуть кнопку — открывается форма",
+        "Сохранить активность — форма закрывается, streak инкрементируется (если была неактивной), прогресс челленджей обновляется"
+      ],
+      "dependencies": ["TASK-018", "TASK-023"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-026",
+      "category": "ui",
+      "priority": "medium",
+      "description": "Heatmap календарь активности (стиль GitHub) на дашборде",
+      "acceptance_criteria": [
+        "components/features/ActivityHeatmap.tsx",
+        "На mobile — 90 дней, на desktop — 365 дней",
+        "Цветовая шкала: 0 активностей — пустая, 1 — светлый, 2-3 — средний, 4+ — тёмный (акцентный цвет)",
+        "Тап на ячейку → tooltip/sheet с деталями дня (список активностей)",
+        "Лейблы дней недели и месяцев",
+        "Использовать react-activity-calendar ИЛИ написать кастомный SVG (предпочтительнее — без зависимости)"
+      ],
+      "test_steps": [
+        "Открыть /dashboard — heatmap отображается, последний день — сегодня (правый-нижний угол)",
+        "В дни с активностями — закрашенные ячейки",
+        "Тап на ячейку → отображаются активности",
+        "На mobile видно 90 дней без overflow"
+      ],
+      "dependencies": ["TASK-022"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-027",
+      "category": "functional",
+      "priority": "medium",
+      "description": "Service для WaterLog: lib/services/water.ts + zod схема",
+      "acceptance_criteria": [
+        "Zod schema: addWaterSchema { amountMl: int > 0 }",
+        "Service: addWater(userId, amountMl), getTodayWater(userId, tz) → { consumed, goal }, listWaterByDay(userId, days) → [{date, total}], deleteWater(userId, id)",
+        "getTodayWater сравнивает с user_settings.water_daily_goal_ml"
+      ],
+      "test_steps": [
+        "addWater(userId, 250) — запись создана",
+        "getTodayWater после двух addWater по 250 — consumed=500",
+        "Записи вчерашнего дня не учитываются в today",
+        "deleteWater — запись удалена"
+      ],
+      "dependencies": ["TASK-005"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-028",
+      "category": "ui",
+      "priority": "medium",
+      "description": "Виджет воды на дашборде + страница /water с графиком",
+      "acceptance_criteria": [
+        "components/features/WaterRing.tsx — круговой индикатор (SVG) с заполнением, кнопки +250 / +500 мл",
+        "На дашборде — компактный виджет",
+        "app/(app)/water/page.tsx — полная страница: круговой индикатор, кнопки быстрого добавления, история сегодняшних записей с возможностью удалить, график потребления за 30/90 дней (Recharts BarChart), настройка дневной цели (форма)",
+        "Server action setWaterGoalAction для изменения water_daily_goal_ml в UserSettings"
+      ],
+      "test_steps": [
+        "На дашборде кликнуть +250 — индикатор обновляется без перезагрузки",
+        "Перейти на /water — отображается круг, история, график",
+        "Изменить дневную цель → виджет на дашборде обновляется",
+        "Удалить запись из истории → значения пересчитываются"
+      ],
+      "dependencies": ["TASK-027", "TASK-009"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-029",
+      "category": "functional",
+      "priority": "medium",
+      "description": "Service для WeightLog: lib/services/weight.ts + zod схема",
+      "acceptance_criteria": [
+        "Zod schema: logWeightSchema { weightKg: float > 0 < 500, measuredAt: date, note? }",
+        "Service: logWeight(userId, input) — upsert по (userId, measuredAt) (одна запись на день), getLatestWeight(userId) → { value, delta, measuredAt }, listWeights(userId, days), deleteWeight(userId, id)",
+        "delta = последний - предпоследний"
+      ],
+      "test_steps": [
+        "logWeight 75.5 на сегодня — запись создана",
+        "logWeight 76.0 на сегодня — запись обновлена (не вторая запись)",
+        "logWeight на вчера 74.0 → getLatestWeight возвращает delta=+1.5 (75.5 - 74.0)",
+        "deleteWeight удаляет"
+      ],
+      "dependencies": ["TASK-005"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-030",
+      "category": "ui",
+      "priority": "medium",
+      "description": "Виджет веса на дашборде + страница /weight с графиком и целью",
+      "acceptance_criteria": [
+        "components/features/WeightWidget.tsx — последний вес, дельта (▲+0.3 / ▼-0.5 с цветом), мини-спарклайн",
+        "app/(app)/weight/page.tsx — форма ввода нового измерения, график за 30/90/365/all (Recharts LineChart) с 7-дневным moving average, история записей, форма установки целевого веса (UserSettings.weight_target_kg + weight_target_date)",
+        "Прогресс к цели: %, дней осталось"
+      ],
+      "test_steps": [
+        "Добавить несколько измерений — график строится",
+        "Установить целевой вес 70 — отображается прогресс",
+        "Виджет на дашборде показывает последний вес и дельту",
+        "Удалить измерение — график пересчитан"
+      ],
+      "dependencies": ["TASK-029", "TASK-009"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-031",
+      "category": "ui",
+      "priority": "medium",
+      "description": "Профиль пользователя /profile со статистикой и архивом челленджей",
+      "acceptance_criteria": [
+        "app/(app)/profile/page.tsx",
+        "Шапка: аватар (из Google), имя, email",
+        "Статистика-блок: общее количество активностей, общая дистанция (км), общие шаги, общее время, текущий streak, лучший streak",
+        "Табы 'Завершённые' / 'Проваленные' с архивом",
+        "Завершённые: карточки с бейджем difficulty (бронза/серебро/золото), названием, итоговым результатом, датой завершения",
+        "Проваленные: процент пройденного прогресса до фейла",
+        "Фильтры по году и difficulty",
+        "Кнопки внизу: 'Подключить Strava' (или 'Отключить'), 'Выйти'"
+      ],
+      "test_steps": [
+        "Открыть /profile — отображаются аватар и имя из Google",
+        "Статистика корректна (сравнить с raw query)",
+        "Завершить челлендж → отображается во вкладке Завершённые",
+        "Просрочить челлендж → во вкладке Проваленные с %",
+        "Кнопка 'Выйти' — signOut, редирект на /login"
+      ],
+      "dependencies": ["TASK-019", "TASK-021", "TASK-008"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-032",
+      "category": "ui",
+      "priority": "low",
+      "description": "Детальная страница челленджа /challenges/[id]",
+      "acceptance_criteria": [
+        "Большой прогресс-бар, current/target/unit",
+        "График прогресса по дням (Recharts AreaChart)",
+        "Список активностей, попавших в этот челлендж (с фильтрацией по периоду)",
+        "Кнопки 'Редактировать' / 'Архивировать' / 'Удалить'",
+        "Если completed — confetti при первом открытии после завершения (TASK-037)"
+      ],
+      "test_steps": [
+        "Открыть челлендж с прогрессом 50/100 — прогресс-бар на 50%",
+        "График отображает накопление прогресса по дням",
+        "Активности отображаются и фильтруются по периоду челленджа"
+      ],
+      "dependencies": ["TASK-014", "TASK-019"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-033",
+      "category": "integration",
+      "priority": "medium",
+      "description": "Strava OAuth flow: подключение/отключение в lib/strava и API routes",
+      "acceptance_criteria": [
+        "lib/strava/oauth.ts: getAuthUrl(state), exchangeCodeForTokens(code), refreshAccessToken(refreshToken)",
+        "app/api/strava/connect/route.ts (GET): редирект на Strava OAuth с scope=read,activity:read_all и state (CSRF)",
+        "app/api/strava/callback/route.ts (GET): обмен code → tokens, шифрование (TASK-006), upsert StravaIntegration, редирект на /profile?strava=connected",
+        "Server action disconnectStravaAction: удаляет StravaIntegration",
+        "При отключении активности с source='strava' остаются в БД"
+      ],
+      "test_steps": [
+        "Кликнуть 'Подключить Strava' — редирект на Strava OAuth",
+        "Авторизоваться — редирект обратно, в БД StravaIntegration с зашифрованными токенами",
+        "Отключить — запись удалена, активности остались",
+        "Подключить повторно — upsert работает, дубликата нет"
+      ],
+      "dependencies": ["TASK-006", "TASK-031"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-034",
+      "category": "integration",
+      "priority": "medium",
+      "description": "Strava token refresh с pre-emptive обновлением и mutex",
+      "acceptance_criteria": [
+        "lib/strava/client.ts: getValidAccessToken(userId) — возвращает дешифрованный access_token, при expires_at - now < 5min делает refresh",
+        "Mutex per-userId (in-memory Map<userId, Promise>) для предотвращения параллельных refresh",
+        "После refresh — атомарное обновление tokens + expires_at в БД",
+        "При 401 от Strava (refresh_token revoked) — пометить StravaIntegration как невалидный (поле needs_reconnect: true) и бросить специфическую ошибку"
+      ],
+      "test_steps": [
+        "Создать StravaIntegration с истёкшим access_token и валидным refresh — getValidAccessToken возвращает новый, БД обновлена",
+        "Параллельно вызвать getValidAccessToken 5 раз для одного user — refresh случается 1 раз (mutex)",
+        "С revoked refresh_token — needs_reconnect=true, ошибка"
+      ],
+      "dependencies": ["TASK-033"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-035",
+      "category": "integration",
+      "priority": "medium",
+      "description": "Strava sync service: первичная синхронизация + cron endpoint",
+      "acceptance_criteria": [
+        "lib/services/strava-sync.ts: syncUserActivities(userId, options?: { since?: Date, limit?: number })",
+        "Использует getValidAccessToken и GET /api/v3/athlete/activities?after={timestamp}&per_page=100",
+        "Постранично выгружает активности (paginate)",
+        "Маппит Strava activity → наша Activity (sport_type → activityType, distance/1000 → distanceKm, moving_time/60 → durationMin)",
+        "Сохраняет через createStravaActivity (upsert по external_id)",
+        "Обновляет last_sync_at",
+        "При первом подключении (last_sync_at IS NULL) — sync за 30 дней",
+        "app/api/cron/strava-sync/route.ts (POST, Bearer ${CRON_SECRET}): для каждого юзера с активной StravaIntegration вызывает syncUserActivities",
+        "Логирует в Sentry per-user success/fail counts"
+      ],
+      "test_steps": [
+        "После подключения Strava — в БД появились активности за 30 дней",
+        "Дублирующая sync не создаёт дубликаты (external_id unique)",
+        "POST /api/cron/strava-sync с Bearer — запускается, sync актуализируется",
+        "Без Bearer — 401",
+        "После sync — прогресс активных челленджей пересчитан"
+      ],
+      "dependencies": ["TASK-034", "TASK-017", "TASK-020"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-036",
+      "category": "ui",
+      "priority": "low",
+      "description": "UI подключения Strava в профиле + индикатор статуса синхронизации",
+      "acceptance_criteria": [
+        "В /profile — секция 'Strava': если не подключено → кнопка 'Подключить Strava' (ссылка на /api/strava/connect)",
+        "Если подключено: отображается athlete_id, last_sync_at ('последняя синхронизация: 5 минут назад'), кнопка 'Синхронизировать сейчас' (триггерит sync через server action), кнопка 'Отключить'",
+        "Если needs_reconnect=true → красное предупреждение 'Требуется переподключение' + кнопка",
+        "Toast при успехе/ошибке"
+      ],
+      "test_steps": [
+        "Без подключения — отображается кнопка 'Подключить'",
+        "После подключения — отображается статус, last_sync_at",
+        "Кликнуть 'Синхронизировать сейчас' — toast 'Синхронизировано N активностей'",
+        "Симулировать needs_reconnect — отображается warning"
+      ],
+      "dependencies": ["TASK-035", "TASK-031"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-037",
+      "category": "ui",
+      "priority": "low",
+      "description": "Confetti-анимация при завершении челленджа",
+      "acceptance_criteria": [
+        "Установить canvas-confetti (легковесный)",
+        "При первом открытии completed челленджа (определять через query param ?just_completed=1 или через sessionStorage по challenge.id) — запускается confetti на 2-3 секунды",
+        "Уважать prefers-reduced-motion (если true — не запускать)",
+        "Срабатывает один раз на челлендж"
+      ],
+      "test_steps": [
+        "Завершить челлендж (current >= target) → редирект с ?just_completed=1 → confetti играет",
+        "Перезагрузить страницу — confetti не повторяется",
+        "В DevTools установить prefers-reduced-motion: reduce — confetti не запускается"
+      ],
+      "dependencies": ["TASK-032"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-038",
+      "category": "ui",
+      "priority": "low",
+      "description": "Empty states и обработка ошибок во всём приложении",
+      "acceptance_criteria": [
+        "Empty states: пустой список челленджей, пустой список активностей, пустая история воды, пустая история веса, пустой архив — все имеют дружелюбный иллюстрированный/иконочный empty state с CTA",
+        "components/ui/EmptyState.tsx — переиспользуемый компонент с props { icon, title, description, action? }",
+        "Error boundaries: app/(app)/error.tsx, app/(app)/not-found.tsx",
+        "Все server actions возвращают понятные сообщения ошибок, отображаются через toast"
+      ],
+      "test_steps": [
+        "Открыть все страницы с пустой БД — везде empty states",
+        "Симулировать ошибку в server action — отображается toast",
+        "Открыть несуществующий /challenges/invalid-id — 404 страница"
+      ],
+      "dependencies": ["TASK-031", "TASK-028", "TASK-030"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-039",
+      "category": "infrastructure",
+      "priority": "low",
+      "description": "Sentry интеграция для client/server/edge с скрабингом PII",
+      "acceptance_criteria": [
+        "Установлен @sentry/nextjs",
+        "Конфиги: sentry.client.config.ts, sentry.server.config.ts, sentry.edge.config.ts",
+        "DSN из env.SENTRY_DSN",
+        "beforeSend hook: фильтрует email, токены, имена пользователей из breadcrumbs и event data",
+        "В development Sentry отключён",
+        "Тестовая ошибка отправляется в Sentry"
+      ],
+      "test_steps": [
+        "Бросить тестовую ошибку в server action → событие появляется в Sentry dashboard",
+        "Проверить event: email и токены не присутствуют в payload",
+        "В dev режиме — события не отправляются"
+      ],
+      "dependencies": ["TASK-003"],
+      "status": "pending"
+    },
+    {
+      "id": "TASK-040",
+      "category": "infrastructure",
+      "priority": "low",
+      "description": "Деплой документация и конфигурация для Render + Neon + UptimeRobot",
+      "acceptance_criteria": [
+        "DEPLOY.md с пошаговой инструкцией: создать Neon проект → DATABASE_URL → создать Render Web Service из репо → переменные окружения → cron jobs (check-deadlines: ежедневно, strava-sync: ежечасно) → UptimeRobot ping каждые 5 минут на /api/health",
+        "Создан app/api/health/route.ts — простой 200 OK с { status: 'ok', db: 'ok' } (включая ping к БД)",
+        "В README.md ссылка на DEPLOY.md",
+        "render.yaml (опц) с описанием сервисов и cron jobs"
+      ],
+      "test_steps": [
+        "Открыть /api/health локально — 200 OK с db статусом",
+        "Симулировать падение БД — /api/health возвращает 503",
+        "Прочитать DEPLOY.md — инструкции достаточно для воспроизведения деплоя"
+      ],
+      "dependencies": ["TASK-020", "TASK-035"],
+      "status": "pending"
+    }
+  ]
+}
