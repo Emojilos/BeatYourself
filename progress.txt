@@ -184,3 +184,82 @@ Verification (all pass):
 - Migration timestamp is 20260430112406 (today, since system clock is set to 2026-04-30).
 - The .env.local NEXTAUTH_URL typo from TASK-003 is still there — irrelevant for Prisma CLI
   (which never reads NEXTAUTH_URL), but `npm run dev` will still fail until the user fixes it.
+
+## 2026-04-30 — TASK-005: Prisma client singleton
+
+Status: done
+
+What was already in place from a prior partial iteration (uncommitted):
+- beatyourself/lib/db/prisma.ts — singleton wired through `@prisma/adapter-pg` and the
+  pooled Neon URL (env.DATABASE_URL), with `import "server-only"` at the top and a
+  `globalThis.__beatyourselfPrisma` cache gated on NODE_ENV !== 'production'.
+- @prisma/adapter-pg@^7.8.0 added to package.json deps (along with package-lock changes).
+- beatyourself/app/api/_smoke-prisma/route.ts and beatyourself/scripts/smoke-prisma-singleton.ts
+  — both verification artifacts the prior iteration created but never finished running.
+
+What I did in this iteration (verification + cleanup, no functional code changes):
+1) Confirmed `pg` is a transitive dep of @prisma/adapter-pg@7.8.0 (read its
+   node_modules/.../package.json) — installing it separately is NOT required.
+2) Verified the prisma.ts code by reading it: singleton is correct (globalThis cache,
+   prod path bypasses cache), variable name `__beatyourselfPrisma` is collision-safe.
+3) `npm run lint`, `npm run typecheck`, `npm run format:check` — all clean.
+4) `npm run build` — production build succeeds, prisma module compiles with no warnings
+   (had to inline DATABASE_URL/NEXTAUTH_SECRET/NEXTAUTH_URL/GOOGLE_CLIENT_ID/SECRET as
+   env-var overrides since .env.local has the typo and dev/build trigger env validation).
+5) Functional smoke against the live Neon DB via a one-off `node` script (NOT @/lib/db/prisma
+   — `server-only` blocks tsx/node from importing it). Used the same code path the singleton
+   uses: `new PrismaClient({ adapter: new PrismaPg(DATABASE_URL) })`.
+   Result: `prisma.user.findMany()` → length=0, `prisma.challenge.findMany()` → length=0.
+   The Neon connection works through the pg adapter against the pooled URL. Tables are
+   empty, as expected immediately after TASK-004's init migration.
+6) HMR singleton smoke: started `npm run dev` with the same env-var overrides; renamed
+   `app/api/_smoke-prisma` to `app/api/smoke-prisma` (Next ignores `_`-prefixed folders);
+   hit /api/smoke-prisma 5 times across 3 HMR file-touches on lib/db/prisma.ts and
+   route.ts. Every request returned {userCount:0, challengeCount:0}, dev server log shows
+   zero "Multiple Prisma instances" warnings. Singleton works.
+7) Cleaned up: deleted app/api/smoke-prisma/ and scripts/. Deleted .next/ to drop stale
+   validator.ts type stubs that referenced the removed route. Re-ran lint/typecheck/format
+   — all clean.
+
+The only warning the dev server emits is a pg-connection-string deprecation about SSL
+modes ('prefer'/'require'/'verify-ca' aliasing 'verify-full'). It comes from `pg` itself
+and applies to any SSL-enabled Postgres driver — unrelated to TASK-005. May want to add
+`?sslmode=verify-full` to DATABASE_URL eventually, or wait for pg-connection-string v3.
+
+## Notes for next iterations
+
+- TASK-003 has a real bug, surfaced here, that I deliberately did NOT fix because the
+  rule is "don't refactor unrelated tasks": **instrumentation.ts is not actually running
+  env validation at dev startup under Next 16 turbopack**. The first dev-server run only
+  printed "Invalid environment variables" when the smoke route was hit (the first import
+  of config/env), not at server boot. So `await import("./config/env")` from
+  beatyourself/instrumentation.ts is being skipped or deferred. The progress.txt entry for
+  TASK-003 claims test_step #1 ("missing DATABASE_URL → server fails on dev") was verified;
+  that's still true in the sense that the first request to a server-only route fails — but
+  it's not failing at process startup as TASK-003's acceptance ("application falls at
+  start") implies. Either:
+    a) Next 16 turbopack doesn't auto-load instrumentation.ts the way Next 15 webpack did
+       — there may be a config flag or a renamed file (instrumentation-client/server split?).
+       Check node_modules/next/dist/docs/instrumentation*.
+    b) The `if (NEXT_RUNTIME === 'nodejs')` guard is wrong for turbopack-dev (NEXT_RUNTIME
+       might not be set, or set to 'edge' for the loader).
+  Recommended fix in a dedicated task or amendment to TASK-003: drop the runtime guard, or
+  switch to the new instrumentation hook signature, or import config/env from a top-level
+  module that's guaranteed to load (e.g., next.config.ts or a server-side file in app/).
+  Note: this is a verification gap, not a security gap — env validation still runs before
+  any DB query, just at request time instead of boot time.
+- For TASK-007 (NextAuth) and onward: every server action / route handler that imports
+  `@/lib/db/prisma` will trigger env validation lazily on first hit. As long as .env.local
+  is correct, this is fine. Make sure to fix the NEXTAUTH_URL typo (extra trailing `"`)
+  before testing TASK-007 — same advice as in TASK-003 progress.
+- The `pg-connection-string` SSL deprecation warning is harmless for now but will become
+  a breaking change in pg v9 / pg-connection-string v3. Track it; consider adding
+  `sslmode=verify-full` to DATABASE_URL after Render-side cert verification is decided.
+- Smoke artifacts (route + script) are deleted. If a future task wants to re-verify the
+  singleton, the simplest pattern is: temporarily add an internal route handler that calls
+  prisma, hit it, then revert. Don't ship debug routes.
+- One pre-existing item I did NOT touch: README.md and .gitkeep deletions, package-lock.json
+  diff, and ralph.sh changes are part of the working tree. ralph.sh and the deleted .gitkeep
+  are unrelated to TASK-005; I'll only stage TASK-005-relevant files (package.json,
+  package-lock.json, lib/db/prisma.ts, lib/db/.gitkeep deletion since lib/db/ now has a real
+  file). README.md / ralph.sh stay untracked-modified for the user to handle.
