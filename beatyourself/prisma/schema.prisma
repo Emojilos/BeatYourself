@@ -1,0 +1,184 @@
+// BeatYourself data model.
+// PRD reference: §5.1, §5.2, §5.3 — entities, fields, indexes.
+// Snake_case at the database layer (@@map / @map), camelCase in Prisma client.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Datasource URLs live in prisma.config.ts (Prisma 7 moved them out of schema).
+// Runtime queries use a driver adapter; migrations use the direct URL.
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------- Enums ----------
+
+enum AuthProvider {
+  google
+  github
+}
+
+enum Theme {
+  light
+  dark
+}
+
+enum ChallengeType {
+  single_day
+  cumulative
+}
+
+enum Metric {
+  steps
+  distance_km
+  duration_min
+  runs_count
+  custom
+}
+
+enum Difficulty {
+  easy
+  medium
+  hard
+}
+
+enum ChallengeStatus {
+  active
+  completed
+  failed
+  archived
+}
+
+enum ActivitySource {
+  manual
+  strava
+}
+
+enum ActivityType {
+  run
+  walk
+  other
+}
+
+// ---------- Models ----------
+
+model User {
+  id         String       @id @default(uuid()) @db.Uuid
+  email      String       @unique
+  name       String?
+  avatarUrl  String?      @map("avatar_url")
+  provider   AuthProvider
+  providerId String       @map("provider_id")
+  createdAt  DateTime     @default(now()) @map("created_at")
+
+  settings          UserSettings?
+  stravaIntegration StravaIntegration?
+  challenges        Challenge[]
+  activities        Activity[]
+  waterLogs         WaterLog[]
+  weightLogs        WeightLog[]
+
+  @@unique([provider, providerId])
+  @@map("users")
+}
+
+model UserSettings {
+  userId                String    @id @map("user_id") @db.Uuid
+  waterDailyGoalMl      Int       @default(2000) @map("water_daily_goal_ml")
+  waterDefaultPortionMl Int       @default(250) @map("water_default_portion_ml")
+  weightTargetKg        Float?    @map("weight_target_kg")
+  weightTargetDate      DateTime? @map("weight_target_date") @db.Date
+  theme                 Theme     @default(light)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_settings")
+}
+
+model Challenge {
+  id           String          @id @default(uuid()) @db.Uuid
+  userId       String          @map("user_id") @db.Uuid
+  title        String          @db.VarChar(100)
+  description  String?         @db.VarChar(500)
+  type         ChallengeType
+  metric       Metric
+  targetValue  Float           @map("target_value")
+  unit         String          @db.VarChar(20)
+  difficulty   Difficulty
+  startDate    DateTime        @map("start_date") @db.Date
+  endDate      DateTime        @map("end_date") @db.Date
+  status       ChallengeStatus @default(active)
+  currentValue Float           @default(0) @map("current_value")
+  createdAt    DateTime        @default(now()) @map("created_at")
+  completedAt  DateTime?       @map("completed_at")
+  color        String?         @db.VarChar(9)
+  icon         String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@map("challenges")
+}
+
+model Activity {
+  id           String         @id @default(uuid()) @db.Uuid
+  userId       String         @map("user_id") @db.Uuid
+  source       ActivitySource @default(manual)
+  externalId   String?        @map("external_id")
+  activityType ActivityType   @map("activity_type")
+  distanceKm   Float?         @map("distance_km")
+  durationMin  Float?         @map("duration_min")
+  steps        Int?
+  activityDate DateTime       @map("activity_date") @db.Date
+  note         String?        @db.VarChar(500)
+  createdAt    DateTime       @default(now()) @map("created_at")
+  stravaData   Json?          @map("strava_data")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([externalId, source])
+  @@index([userId, activityDate])
+  @@map("activities")
+}
+
+model WaterLog {
+  id       String   @id @default(uuid()) @db.Uuid
+  userId   String   @map("user_id") @db.Uuid
+  amountMl Int      @map("amount_ml")
+  loggedAt DateTime @default(now()) @map("logged_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, loggedAt])
+  @@map("water_logs")
+}
+
+model WeightLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  weightKg   Float    @map("weight_kg")
+  measuredAt DateTime @map("measured_at") @db.Date
+  note       String?  @db.VarChar(500)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, measuredAt])
+  @@map("weight_logs")
+}
+
+model StravaIntegration {
+  userId                String    @id @map("user_id") @db.Uuid
+  stravaAthleteId       BigInt    @unique @map("strava_athlete_id")
+  accessTokenEncrypted  String    @map("access_token_encrypted")
+  refreshTokenEncrypted String    @map("refresh_token_encrypted")
+  expiresAt             DateTime  @map("expires_at")
+  lastSyncAt            DateTime? @map("last_sync_at")
+  connectedAt           DateTime  @default(now()) @map("connected_at")
+  needsReconnect        Boolean   @default(false) @map("needs_reconnect")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("strava_integrations")
+}

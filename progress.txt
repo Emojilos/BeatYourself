@@ -114,3 +114,73 @@ All checks pass (npm run typecheck / lint / format:check / build).
 - For server actions/services importing env: use `import { env } from "@/config/env"` once
   TASK-005+ wires path aliases, or relative paths until then. The "server-only" import in
   env.ts will break the build if it's accidentally pulled into a client component.
+
+## 2026-04-30 — TASK-004: Prisma schema + initial migration
+
+Status: done
+
+What was already in place:
+- beatyourself/prisma/ existed with .gitkeep only
+- beatyourself/lib/db/ existed with .gitkeep only
+- /.env.local at repo root has DATABASE_URL (Neon pooled) and DIRECT_URL (Neon direct)
+- DIRECT_URL was flagged in prior progress notes as something to add — see resolution below
+
+Prisma 7 surprise (deviation from tasks.json wording):
+- tasks.json TASK-004 acceptance says "schema.prisma" should hold the datasource URLs.
+  Prisma 7.8 broke that. The schema engine now refuses `url`/`directUrl` inside
+  `datasource db {}` and requires them in a new `prisma.config.ts` file at the project root.
+  Error: `P1012 The datasource property url is no longer supported in schema files. Move
+  connection URLs ... to prisma.config.ts`. So:
+    * schema.prisma datasource has only `provider = "postgresql"`.
+    * prisma.config.ts (defineConfig from "prisma/config") sets `datasource.url = env("DIRECT_URL")`
+      and `migrations.path = "prisma/migrations"`. It calls `loadEnvConfig(__dirname/..)` from
+      @next/env so the repo-root .env.local populates process.env before Prisma reads DIRECT_URL.
+    * In Prisma 7 `Datasource` only takes `url` + `shadowDatabaseUrl` — there's no `directUrl`.
+      The migration engine connects to that one URL; the runtime client (TASK-005) will use
+      a driver adapter against DATABASE_URL (pooled).
+
+What I added:
+- beatyourself/prisma/schema.prisma — full data model (8 models including the `User` parent,
+  7 enums, indexes per PRD §5.3 + a couple extras that downstream tasks need: weight_logs
+  (user_id, measured_at) UNIQUE for the §3.6 'one weight per day' rule; challenges.current_value
+  cached column for TASK-019; strava_integrations.needs_reconnect for TASK-034). Snake_case at
+  DB layer via @map/@@map; camelCase in client.
+- beatyourself/prisma.config.ts — loads .env.local from repo root, points schema engine at DIRECT_URL.
+- beatyourself/prisma/migrations/20260430112406_init/migration.sql — applied to Neon. 167 lines.
+- beatyourself/prisma/migrations/migration_lock.toml — provider=postgresql.
+- package.json scripts: db:generate, db:migrate, db:migrate:status, db:reset, db:studio.
+- Dependencies: prisma@^7.8.0 (devDependency), @prisma/client@^7.8.0 (dependency).
+
+Verification (all pass):
+- npx prisma validate              -> schema valid
+- npx prisma generate              -> client generated to node_modules/@prisma/client
+- npx prisma migrate dev --name init -> migration created and applied to Neon
+- npx prisma migrate status        -> 'Database schema is up to date'
+- npx prisma studio --port 5555    -> HTTP 200 on /
+- import-types smoke test          -> all 8 models + 7 enums type-check via @prisma/client
+- npm run lint / typecheck / format:check / build -> all clean
+
+## Notes for next iterations
+
+- DO NOT add DIRECT_URL to config/env.ts. Prisma CLI reads it directly from .env.local via
+  prisma.config.ts. config/env.ts only validates env that the Next.js runtime needs, and the
+  runtime won't touch DIRECT_URL — it'll use the pooled DATABASE_URL through the driver adapter.
+- TASK-005 (Prisma client singleton) needs Prisma 7's mandatory driver adapter. Install
+  `@prisma/adapter-pg` and `pg`, then construct PrismaClient with
+  `new PrismaClient({ adapter: new PrismaPg({ connectionString: env.DATABASE_URL }) })`.
+  The `@prisma/adapter-neon` (HTTP serverless driver) is NOT what we want — Render runs a
+  long-lived Node server, and the PRD explicitly targets Render + Neon + UptimeRobot. pg over
+  the Neon pooler URL is the right pairing. Without an adapter, instantiating PrismaClient
+  throws at runtime in v7 — see node_modules/@prisma/client/runtime/client.d.ts:2012.
+- Migration file is committed at prisma/migrations/20260430112406_init/. The .gitignore
+  excludes only `/prisma/migrations/dev/` — our migrations live one level up so they're tracked
+  normally. (The /dev/ ignore from TASK-001 still seems unnecessary; leaving alone, no harm.)
+- Prisma generate runs automatically as a postinstall (built into prisma 7); but if a teammate
+  pulls a fresh checkout, `npm install` triggers a generate cycle. If it ever fails because
+  prisma.config.ts can't find ../.env.local (e.g., the project is opened from a different
+  cwd), set DIRECT_URL inline.
+- For seed scripts (later tasks), prisma.config.ts has a `migrations.seed` slot — point it
+  at `tsx prisma/seed.ts` when needed.
+- Migration timestamp is 20260430112406 (today, since system clock is set to 2026-04-30).
+- The .env.local NEXTAUTH_URL typo from TASK-003 is still there — irrelevant for Prisma CLI
+  (which never reads NEXTAUTH_URL), but `npm run dev` will still fail until the user fixes it.
