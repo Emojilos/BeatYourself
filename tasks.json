@@ -190,7 +190,8 @@
         "Encrypt одного и того же значения дважды — два разных ciphertext (разные IV)"
       ],
       "dependencies": ["TASK-003"],
-      "status": "pending"
+      "status": "done",
+      "notes": "lib/crypto/cipher.ts exports encrypt/decrypt using node:crypto AES-256-GCM with a 12-byte IV (NIST SP 800-38D recommended length) and 16-byte auth tag. Wire format is `iv:authTag:ciphertext` with each segment base64. Key handling: cipher reads process.env.ENCRYPTION_KEY at call time (not module-load time) so unit tests can stub the key without satisfying the full @/config/env zod schema; this also means the env validator's broader checks still apply when the Next.js runtime boots. Key accepts either 64-char hex or 44-char base64 (validated to land at 32 bytes after decode). `import 'server-only'` at top of cipher.ts blocks accidental client bundle inclusion. Test infra: installed vitest@4.1.5 + @vitest/coverage-v8; vitest.config.ts aliases `server-only` to test/server-only-shim.ts (no-op) and `@/*` to project root. npm scripts added: `test` (vitest run) and `test:watch` (vitest). 10 unit tests (lib/crypto/cipher.test.ts) cover: round-trip with edge cases (empty, unicode, 10k-char, JSON tokens); unique IV per encrypt; wire format (iv=12 bytes, authTag=16 bytes, ct>0); ciphertext tampering throws; auth-tag tampering throws; malformed payload throws; wrong-key decrypt throws; base64 key works alongside hex; missing key throws; wrong-length key throws. Verification (all clean): npm test (10/10), npm run lint, npm run typecheck, npm run format:check, npm run build (with shell-overridden env since .env.local has the known TASK-003 NEXTAUTH_URL typo)."
     },
     {
       "id": "TASK-007",

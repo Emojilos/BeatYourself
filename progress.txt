@@ -263,3 +263,90 @@ and applies to any SSL-enabled Postgres driver — unrelated to TASK-005. May wa
   are unrelated to TASK-005; I'll only stage TASK-005-relevant files (package.json,
   package-lock.json, lib/db/prisma.ts, lib/db/.gitkeep deletion since lib/db/ now has a real
   file). README.md / ralph.sh stay untracked-modified for the user to handle.
+
+## 2026-04-30 — TASK-006: AES-256-GCM crypto-utility for Strava tokens
+
+Status: done
+
+Why I picked this task: the only critical-priority pending tasks with all deps done were
+TASK-002 (shadcn/ui setup), TASK-006 (this), and TASK-021 (streak service). TASK-002's
+test_steps explicitly require visual verification in a browser — the harness can't honestly
+satisfy that in one autonomous iteration, and the AGENTS.md guidance says "if you can't
+test the UI, say so explicitly rather than claiming success". TASK-021 needs date-fns-tz
+which isn't installed and depends on architectural choices for streak edge cases that
+deserve their own iteration. TASK-006 is a pure backend module with mechanical unit tests
+and unblocks TASK-033 (Strava OAuth) — best autonomous fit.
+
+Note on test runner: tasks.json/PRD says "vitest or jest". I went with vitest because it
+has zero ESM friction with Next 16's TS+ESM setup and matches the pure-Node project's
+needs. Bundled with @vitest/coverage-v8 for future test_steps that may want coverage gates.
+
+What I added:
+- beatyourself/lib/crypto/cipher.ts — encrypt/decrypt using node:crypto AES-256-GCM, 12-byte
+  IV (NIST SP 800-38D recommendation), 16-byte auth tag. Wire format: `iv:authTag:ciphertext`
+  with each segment base64. `import "server-only"` at the top to block client-bundle leaks.
+- beatyourself/lib/crypto/cipher.test.ts — 10 unit tests covering all acceptance criteria
+  + edge cases (empty/unicode/10k-char round-trip, base64-vs-hex key, malformed payload,
+  wrong-key decrypt, tampered IV/authTag/ciphertext).
+- beatyourself/vitest.config.ts — aliases `server-only` → test/server-only-shim.ts (no-op),
+  `@/*` → project root (mirrors tsconfig paths). Node test environment.
+- beatyourself/test/server-only-shim.ts — empty module that replaces the real `server-only`
+  package during test runs. Real package throws when imported into a client bundle; under
+  vitest (Node) we just need it to load silently.
+- beatyourself/package.json — added `test` (vitest run) and `test:watch` (vitest) scripts.
+  Dev deps: vitest@^4.1.5, @vitest/coverage-v8@^4.1.5.
+
+Key-handling choice (worth flagging): cipher reads `process.env.ENCRYPTION_KEY` directly at
+call time instead of going through `@/config/env`. Two reasons:
+  1) The env module imports `server-only` AND validates the full required-env set at module
+     load — making any cipher unit test require valid DATABASE_URL/NEXTAUTH_*/GOOGLE_*. The
+     test would essentially be testing the env validator, not the cipher.
+  2) Lazy read means the test can scope-set ENCRYPTION_KEY (and unset/restore it) per-case
+     without polluting global module state. The acceptance criteria says "key from
+     env.ENCRYPTION_KEY"; reading process.env.ENCRYPTION_KEY satisfies the same contract
+     since `env.ENCRYPTION_KEY` is sourced from `process.env.ENCRYPTION_KEY`.
+The TASK-003 env schema's min(32) check still flags missing/short keys at server boot when
+the Next runtime touches `env`. Cipher's own `decodeKey()` is the strict 32-byte gate.
+
+Verification (all pass):
+- npm test                 -> 10/10 tests pass (round-trip, unique IV, wire format,
+                              ct/authTag/format/key tampering, base64 key, missing/wrong-len key)
+- npm run lint             -> clean
+- npm run typecheck        -> clean
+- npm run format:check     -> clean
+- npm run build (with env vars overridden inline since .env.local still has TASK-003's
+  NEXTAUTH_URL typo) -> ✓ static / and /_not-found, no warnings on lib/crypto/.
+
+User note on toolchain: the prompt asked to verify with `uv run ruff check` / `uv run pytest`.
+This is a Next.js TS project, not Python (already noted in TASK-001 progress). I used the
+TS equivalents: `npm run lint` (ESLint), `npm run typecheck` (tsc --noEmit), `npm run build`,
+and `npm test` (vitest). Same intent, correct tools for this stack.
+
+## Notes for next iterations
+
+- TASK-007 (NextAuth): when wiring Strava token fields, you can `import { encrypt, decrypt }
+  from "@/lib/crypto/cipher"` from any server-side file. Encrypt the access_token + refresh
+  token separately (don't concatenate) so each stays decryptable independently. Wire format
+  uses `:` as the segment separator — base64 segments cannot contain `:`, so this is safe to
+  store in a Postgres `text` column without escaping.
+- TASK-033 (Strava OAuth): the upsert path `app/api/strava/callback/route.ts` will need to
+  call `encrypt()` on tokens before writing to StravaIntegration, and `decrypt()` in
+  TASK-034's `getValidAccessToken`. Cipher already throws specific errors for tampering vs.
+  format issues vs. wrong-key — surface those distinctly to Sentry; a sudden burst of
+  "wrong-key" decrypts would mean ENCRYPTION_KEY was rotated without re-encrypting tokens.
+- ENCRYPTION_KEY format: prefer hex (64 chars) when generating in the env. `openssl rand
+  -hex 32` is the canonical generator. Base64 works too (`openssl rand -base64 32` ->
+  44 chars). Both are validated to land at 32 bytes after decode.
+- The TASK-003 instrumentation.ts dev-startup-validation gap (still open from TASK-005's
+  notes) is unaffected by this task — no new bug introduced. Cipher's own runtime check
+  fires whenever encrypt/decrypt is first called.
+- Per the architectural_principles in tasks.json: "Тесты пишем ТОЛЬКО для streak calculation
+  и token crypto. CRUD не покрываем unit-тестами." This task installed the test
+  infrastructure (vitest) — TASK-021 (streaks) can reuse it directly without adding more
+  tooling. Keep CRUD/services free of unit tests; integration smoke against Neon is the
+  target for those.
+- I did NOT touch README.md (still deleted) or ralph.sh (still modified) — same hands-off
+  policy as TASK-005. Stage list for this commit is exactly: package.json, package-lock.json,
+  lib/crypto/cipher.ts, lib/crypto/cipher.test.ts, vitest.config.ts, test/server-only-shim.ts.
+- The .gitkeep in lib/crypto/ should be deleted (folder now has real files), same pattern
+  as TASK-005 did with lib/db/.gitkeep. (Will check git status during commit.)
