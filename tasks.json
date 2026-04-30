@@ -125,7 +125,8 @@
         "Импортировать env в любом server-файле — TypeScript видит типы"
       ],
       "dependencies": ["TASK-001"],
-      "status": "pending"
+      "status": "done",
+      "notes": "config/env.ts validates with zod 4 (z.url, z.email, etc.) and exports typed env. Required: DATABASE_URL, NEXTAUTH_SECRET (>=32), NEXTAUTH_URL, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET. Optional: ALLOWED_EMAIL, STRAVA_*, ENCRYPTION_KEY, CRON_SECRET, SENTRY_DSN. Uses @next/env loadEnvConfig() with path resolved to repo root (parent of cwd) since user keeps .env.local at repo root, not inside beatyourself/. Empty strings in process.env are coerced to undefined before parse so blank optionals don't trip min-length checks. Validation runs at server startup via instrumentation.ts (NEXT_RUNTIME==='nodejs'). All test_steps verified via npm run dev with shell overrides: missing DATABASE_URL → 'expected string, received undefined'; invalid URL (NEXTAUTH_URL with trailing quote in user's .env.local) → 'Invalid URL'; typecheck passes (types flow). Added @next/env to package.json as explicit dep. .env.example exists at repo root with placeholders."
     },
     {
       "id": "TASK-004",

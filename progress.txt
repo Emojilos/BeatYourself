@@ -56,5 +56,61 @@ Verification (all pass):
 ## Open follow-ups (do NOT silently fix in unrelated tasks)
 
 - Decide canonical location for .env.local (repo root vs beatyourself/). Affects TASK-003.
+  -> RESOLVED in TASK-003: kept at repo root, loaded via @next/env loadEnvConfig(..). The
+     beatyourself/.gitignore already handles `.env*`, repo-root .gitignore has `.env.local`.
 - The repo-root .gitignore has only `.env.local`. If env files move into beatyourself/, the
   beatyourself/.gitignore already handles `.env*`.
+
+## 2026-04-30 — TASK-003: zod-validated env config
+
+Status: done
+
+What was already in place from a prior partial iteration (uncommitted):
+- beatyourself/config/env.ts with a hand-rolled regex parser for the repo-root .env.local
+- beatyourself/instrumentation.ts that imports config/env in NEXT_RUNTIME==='nodejs'
+- /.env.example at repo root with placeholders (DATABASE_URL, NEXTAUTH_*, GOOGLE_*,
+  ALLOWED_EMAIL, STRAVA_*, ENCRYPTION_KEY, CRON_SECRET; SENTRY_DSN commented)
+
+What I changed in this iteration:
+- Replaced the custom .env.local reader with @next/env's loadEnvConfig() pointed at the
+  repo root (path.resolve(process.cwd(), "..")). Reasons:
+    * Standard Next.js dotenv pipeline (multiline values, $VAR expansion, all .env.* tiers).
+    * Eliminates a brittle 25-line regex parser.
+    * Keeps the .env.local at the repo root (user's choice — .env.local has Neon DATABASE_URL,
+      NEXTAUTH_SECRET, GOOGLE OAuth creds, ALLOWED_EMAIL).
+- Added @next/env@16.2.4 as an explicit dep in beatyourself/package.json (was a transitive of
+  next, but importing it directly warrants making it explicit).
+- Added a coerceEmptyToUndefined() pass over process.env before zod safeParse. Optionals
+  (STRAVA_*, ENCRYPTION_KEY, CRON_SECRET, SENTRY_DSN) are .optional() so empty .env values
+  must read as undefined, not "" — otherwise the min-length checks fire on blank fields and
+  break first-time setup. This mirrors common dotenv-zod patterns.
+
+Test_steps (all verified by running `npm run dev` from beatyourself/):
+1) Missing DATABASE_URL — `DATABASE_URL= NEXTAUTH_URL=http://localhost:3000 npm run dev`
+   -> instrumentation hook throws with "DATABASE_URL: expected string, received undefined".
+2) Invalid URL — currently the user's .env.local has a typo
+   `NEXTAUTH_URL="http://localhost:3000""` (extra trailing `"`). Without override, dev fails
+   with "NEXTAUTH_URL: Invalid URL". This is the live demonstration of test_step #2.
+3) TypeScript types — env.ts exports `env: z.infer<typeof envSchema>`. `npm run typecheck`
+   is clean; any server-side import of `@/config/env` (or relative path) gets fully typed env.
+
+All checks pass (npm run typecheck / lint / format:check / build).
+
+## Notes for next iterations
+
+- USER ACTION REQUIRED before app starts cleanly: fix the typo in /.env.local —
+  `NEXTAUTH_URL="http://localhost:3000""` should be `NEXTAUTH_URL="http://localhost:3000"`.
+  I deliberately did NOT modify .env.local (it's user-owned, gitignored, and contains
+  secrets). The validator already flags it on `npm run dev`, which is the desired UX.
+- env.ts uses `process.cwd()` to find the repo root. npm scripts (`dev`/`build`/`start`)
+  set cwd to beatyourself/, so `path.resolve(cwd, "..")` resolves to the repo root. If a
+  future workflow runs Next from a different cwd, this will need adjustment.
+- DIRECT_URL is present in .env.local (Neon direct, for Prisma migrations) but is NOT in
+  the zod schema yet. Add it in TASK-004 (Prisma) — the PRD splits pooled (DATABASE_URL)
+  from direct (DIRECT_URL).
+- The .env.example currently has STRAVA_* / ENCRYPTION_KEY / CRON_SECRET as blank values.
+  That's fine now that empty -> undefined; first-time devs can `cp .env.example .env.local`
+  and only fill in the required Google + DB values.
+- For server actions/services importing env: use `import { env } from "@/config/env"` once
+  TASK-005+ wires path aliases, or relative paths until then. The "server-only" import in
+  env.ts will break the build if it's accidentally pulled into a client component.
