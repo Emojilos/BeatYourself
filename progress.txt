@@ -350,3 +350,85 @@ and `npm test` (vitest). Same intent, correct tools for this stack.
   lib/crypto/cipher.ts, lib/crypto/cipher.test.ts, vitest.config.ts, test/server-only-shim.ts.
 - The .gitkeep in lib/crypto/ should be deleted (folder now has real files), same pattern
   as TASK-005 did with lib/db/.gitkeep. (Will check git status during commit.)
+
+## 2026-05-01 — TASK-021: Streak calculation service (timezone-aware)
+
+Status: done
+
+Why I picked this task: scanned the critical-pending bucket for tasks whose deps are done.
+Candidates were TASK-002 (shadcn/ui), TASK-007 (NextAuth + Google OAuth), TASK-021. TASK-002
+and TASK-007 both require visual/OAuth verification in a real browser — the harness can't
+honestly verify either. TASK-021 is pure backend with mechanical unit tests, all deps (TASK-005)
+are done, and there were already two uncommitted files in the working tree from a prior
+partial iteration: lib/services/streaks.ts and lib/services/streaks.test.ts. The right move
+was to verify them rather than start a new task and let half-finished work rot.
+
+What was already in place from the prior partial iteration (uncommitted, no commits):
+- lib/services/streaks.ts — full implementation: calculateStreak(activities, userTz, now)
+  -> {current, longest}. Uses date-fns-tz formatInTimeZone. Pure function.
+- lib/services/streaks.test.ts — 16 vitest cases covering all acceptance criteria.
+- date-fns@^4.1.0 + date-fns-tz@^3.2.0 in package.json deps (added by prior iteration).
+
+What I did in this iteration:
+1) Read both files end-to-end. Audited the bucketing strategy because at first glance the
+   asymmetry looked suspicious — activities are bucketed by **UTC** day key while "today" is
+   computed in the **user's** tz. Resolution after checking schema.prisma:133:
+   `activityDate DateTime @map("activity_date") @db.Date`. Prisma maps @db.Date to a
+   UTC-midnight Date with no time component. So the activity isn't "an event at some
+   instant" — it's "calendar day N", stored as UTC-midnight by Prisma convention. UTC
+   bucketing is therefore correct (it just extracts the calendar day from a Date that
+   happens to be at UTC midnight). Today-in-user-tz vs activity-day-in-UTC ends up being
+   calendar-day-vs-calendar-day. The LA test (line 120-130) confirms this: now=2026-04-30
+   06:00Z (=04-29 23:00 LA → today key "2026-04-29"), activities for 04-28 and 04-29 (UTC
+   keys "2026-04-28" and "2026-04-29") → current=2 ✓.
+2) Verified date-fns-tz + date-fns are installed: `npm test` would have failed otherwise.
+3) Ran the four-step verification gate (all pass):
+   - npm test          -> 26/26 (10 cipher + 16 streaks)
+   - npm run lint      -> clean
+   - npm run typecheck -> clean
+   - npm run format:check -> initially flagged streaks.ts + streaks.test.ts (the prior
+     iteration didn't run prettier before stopping). Ran `npx prettier --write` on both;
+     the only change was wrapping the long parameter list of computeCurrentStreak across
+     multiple lines. Re-ran format:check + tests — clean and 26/26.
+4) Updated tasks.json: status -> done with notes block explaining the UTC-bucketing /
+   user-tz-today asymmetry so future readers don't think it's a bug.
+
+Toolchain note: user prompt asks for `uv run ruff check` and `uv run pytest`. As noted in
+TASK-001/006 progress, this is a TS/Next.js project, not Python. Used the equivalents:
+ESLint / tsc --noEmit / vitest. Same intent, correct tooling for the stack.
+
+## Notes for next iterations
+
+- TASK-022 (dashboard aggregation) will import calculateStreak from @/lib/services/streaks.
+  Pass userTz from UserSettings.timezone (default "Europe/Moscow" from PRD §5.2). Pull
+  activities for the **streak window only** — no need to fetch all-time activities. To
+  compute longest correctly you do need all activity dates; consider a separate query
+  `prisma.activity.groupBy({ by: ['activityDate'], where: { userId } })` returning only
+  unique dates, which keeps payload small even for years of history. Don't pull full
+  activity rows just to dedupe by day.
+- TASK-023 (streak block UI) reads {current, longest} from getDashboardData. The pure-fn
+  shape means UI tests can mock the service trivially — no DB needed.
+- The streak service does not consult Activity.activityType — any activity counts. If a
+  future requirement says "rest days don't break the streak" or "only running counts",
+  add a filter at the query layer (TASK-022), not inside calculateStreak. Keep the pure
+  function source-agnostic.
+- Activity ingestion (TASK-016/017) MUST store activityDate at UTC-midnight matching the
+  user-tz calendar day. The manual-entry form should accept a date input in the user's
+  timezone and serialize to UTC-midnight of the same calendar day before write. Strava sync
+  (TASK-035) needs the same: convert strava activity start_date → user-tz calendar day →
+  UTC-midnight Date. If this convention is broken anywhere, streak calculation will silently
+  drift by ±1 day for users in non-UTC timezones.
+- Default timezone "Europe/Moscow" lives in two places now: DEFAULT_USER_TZ in streaks.ts
+  and UserSettings.timezone default in schema.prisma:31 ("Europe/Moscow"). Keep them in
+  sync. If the project later supports per-user tz selection, propagate from UserSettings
+  through getDashboardData rather than relying on the streaks default.
+- I deliberately did NOT touch the long-standing TASK-003 instrumentation.ts gap or the
+  user's .env.local NEXTAUTH_URL typo — both still flagged in earlier progress entries.
+- Working tree at end of this iteration: tasks.json modified, progress.txt modified,
+  lib/services/streaks.ts new, lib/services/streaks.test.ts new. ralph.sh and the
+  pre-existing package-lock.json/package.json modifications are unrelated to TASK-021;
+  same hands-off policy as prior iterations — only stage TASK-021 files.
+- Architectural principle reminder: tasks.json says "Тесты пишем ТОЛЬКО для streak
+  calculation и token crypto." Both are now done. Future CRUD services (challenges,
+  activities, water, weight) get NO unit tests — only integration smoke against Neon
+  when needed.
