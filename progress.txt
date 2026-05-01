@@ -432,3 +432,115 @@ ESLint / tsc --noEmit / vitest. Same intent, correct tooling for the stack.
   calculation и token crypto." Both are now done. Future CRUD services (challenges,
   activities, water, weight) get NO unit tests — only integration smoke against Neon
   when needed.
+
+## 2026-05-01 — TASK-010: Zod schemas for Challenge
+
+Status: done
+
+Why I picked this task: scanned the priority queue for tasks with all deps satisfied that
+are honestly verifiable in a headless harness. Critical-pending TASK-002 (shadcn/ui) and
+TASK-007 (NextAuth+Google OAuth) both need real browser/OAuth interaction — same constraint
+prior iterations flagged. Among high-pending, TASK-010 is a pure-backend module that
+unblocks the whole challenge feature chain (TASK-011 → 012 → 013 → 014 → 019 → 022),
+making it the single highest-leverage task I can fully verify.
+
+What I added:
+- beatyourself/lib/validation/challenge.ts — createChallengeSchema, updateChallengeSchema,
+  inferred types CreateChallengeInput / UpdateChallengeInput.
+
+Key design choices (worth flagging):
+1) `z.enum(<prisma const>)` over re-declaring string literals. Prisma 7's prisma-client-js
+   generator emits `as const` runtime objects (verified at the REPL: `ChallengeType =
+   {single_day:'single_day', cumulative:'cumulative'}`), and zod v4's `z.enum()` accepts
+   them directly. This avoids the duplicated-literal drift that would happen if schema.prisma
+   added a new enum value but lib/validation didn't. Trade-off: importing @prisma/client
+   into a 'shared' (client+server) module. Safe because Prisma's enum exports are pure
+   runtime constants — no PrismaClient instantiation, no node-only deps. The Next bundler
+   tree-shakes them down to plain object literals in the client bundle.
+2) `z.coerce.date()` for startDate/endDate. Forms send ISO strings; server actions can also
+   pass real Date objects. Coerce handles both, and rejects garbage like "banana" cleanly.
+3) Cross-field refine on create (`endDate >= startDate`) compares `.getTime()` not the
+   Date references — equal dates allowed, which is correct for single-day challenges (the
+   PRD's `type: single_day` use case where start==end is the whole point).
+4) updateChallengeSchema is a fresh `z.object`, NOT `createChallengeSchema.partial()`.
+   Reason: the spec forbids editing metric/targetValue/type/startDate/title after creation
+   (TASK-010 + TASK-015). With a fresh object, those fields are simply absent from the
+   shape and zod's default `.strip()` mode discards them silently — DevTools spoof attempts
+   from TASK-015's test_step #3 produce a clean parsed object that just doesn't carry the
+   forbidden field, so the service layer can never accidentally write it. A `.partial()`
+   approach would have included those fields and required explicit refines to reject them.
+   Verified: `updateChallengeSchema.parse({description:'x', metric:'steps'})` → output has
+   no `metric` key.
+5) updateChallengeSchema does NOT cross-validate endDate vs startDate (startDate isn't in
+   scope). The service layer in TASK-011 must re-fetch the existing row and verify the new
+   endDate >= existing startDate. Documented in the task notes so TASK-011 doesn't miss it.
+6) `targetValue` uses `z.number().positive()` — rejects 0, negatives, and string inputs
+   (no implicit coercion). The form will need to convert input string → Number before
+   passing to the action. (Could have used `z.coerce.number().positive()`, but explicit
+   server-side typing is safer; HTML inputs of type=number give us a number when read via
+   react-hook-form's valueAsNumber.)
+7) Color regex matches both #RRGGBB (7 chars) and #RRGGBBAA (9 chars) — schema.prisma's
+   `color VarChar(9)` is the upper bound. Short forms (#RGB) are rejected because they'd
+   need expansion before storage.
+
+Verification (per architectural_principles, NO permanent unit test file added — only
+streak/crypto get committed tests). Did a one-off node verification covering all TASK-010
+test_steps + edge cases:
+- Wrote /tmp/verify-task-010.mjs (29 cases).
+- Ran via `node --experimental-strip-types` (Node v25.8.0, native TS strip).
+- Result: 29/29 passed. Cases: valid full+minimal create; empty/whitespace/oversize title
+  rejection; oversize description; targetValue 0 / negative / string rejection; invalid
+  enum values for type/metric/difficulty/status; endDate<startDate refine; endDate==startDate
+  accepted (single-day); empty/oversize unit; hex regex (long-form accepted, #RGB rejected,
+  named color rejected); update partial inputs; all five read-only fields stripped on
+  update (metric, targetValue, type, startDate, title); empty {} parses to {}; endDate
+  alone parses on update.
+- Deleted the temp script after verification.
+
+Standard build gates (all pass):
+- npm run typecheck      -> clean
+- npm run lint           -> clean
+- npm run format:check   -> clean
+- npm test               -> 26/26 (10 cipher + 16 streaks; pre-existing suite unaffected)
+- npm run build          -> ✓ static / and /_not-found (env-vars overridden inline since
+                            .env.local still has TASK-003's NEXTAUTH_URL typo)
+
+User toolchain note: prompt asked for `uv run ruff check` / `uv run pytest`. As noted in
+TASK-001/006/021 progress, this is a TS/Next.js project, not Python. Used the equivalents:
+ESLint / tsc --noEmit / vitest / next build. Same intent, correct tooling.
+
+## Notes for next iterations
+
+- TASK-011 (Challenge service): when implementing updateChallenge, you must re-fetch the
+  existing row and validate `newEndDate >= existing.startDate` before writing. The schema
+  intentionally cannot enforce this — startDate isn't in the update payload. If the new
+  endDate is in the past relative to today, that's also worth checking (probably should
+  set status=failed via the cron in TASK-020, not the update path — but think about it).
+- TASK-014 (challenge form): the form submits to createChallengeAction, which will call
+  createChallengeSchema. react-hook-form should use `valueAsNumber: true` on the
+  targetValue input — otherwise you'll get a string and zod rejects it. Likewise the
+  date inputs should produce ISO strings (HTML date input default) or Date objects;
+  z.coerce.date() handles both.
+- TASK-015 (challenge edit page): the test_step #3 says "send targetValue via DevTools →
+  rejected". With the current schema, targetValue is silently STRIPPED rather than rejected
+  — the action just won't write it. If you want explicit rejection for security telemetry,
+  switch updateChallengeSchema to `.strict()` mode — that throws on unknown keys. Prefer
+  strip (current) unless you have a Sentry signal to wire up.
+- For shared client+server use: importing the schema in a client component pulls in
+  @prisma/client's runtime enum constants. They're tree-shake-friendly (pure object literals)
+  but if bundle size becomes a concern, mirror the four enum values inline. For now,
+  importing keeps single-source-of-truth with the DB.
+- TASK-016 (Activity zod schema) follows the same pattern. When picking it up: import
+  ActivityType from @prisma/client; refine over (distanceKm || durationMin || steps) > 0
+  for the "at least one metric" rule; note + 500-char cap. Same architectural-principle
+  rule applies — no permanent unit test file, verify via one-off script.
+- TASK-003 instrumentation.ts dev-startup-validation gap (open since TASK-005) and the
+  user's .env.local NEXTAUTH_URL typo are both unchanged. Same hands-off policy.
+- Working tree at end of this iteration: tasks.json modified, progress.txt modified,
+  lib/validation/challenge.ts new. ralph.sh and the pre-existing package-lock.json /
+  deleted README.md remain unstaged — same hands-off policy as prior iterations. Stage
+  list: lib/validation/challenge.ts, lib/validation/.gitkeep deletion (folder now has a
+  real file), tasks.json, progress.txt.
+- The Node 25 `MODULE_TYPELESS_PACKAGE_JSON` warning during the verification run is
+  harmless — it's a perf hint about adding `"type":"module"` to package.json. Doing so
+  could change Next 16 module-resolution semantics elsewhere; leaving alone.
