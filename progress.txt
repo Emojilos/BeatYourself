@@ -682,3 +682,133 @@ equivalents: ESLint / tsc --noEmit / vitest / next build. Same intent, correct t
   no event bus, no BaseService". challenges.ts is a flat module of free functions —
   exactly that style. When TASK-016/017 (Activity service) follows, keep the same shape:
   free functions taking userId first, no class wrappers.
+
+## 2026-05-02 — TASK-019: Challenge progress calculation (pure + recalc)
+
+Status: done
+
+Why I picked this task: scanned the priority queue for highest-priority pending with all
+deps satisfied. Critical-pending TASK-002 (shadcn/ui) and TASK-007 (NextAuth+Google OAuth)
+both need real browser/OAuth verification — the harness can't honestly verify either
+(same constraint flagged in every prior iteration). TASK-019 is critical priority, deps
+done (TASK-011), pure backend with mechanical unit tests, and unblocks the largest
+downstream chain: TASK-017 (Activity service calls recalculateChallengeProgress on
+create/update/delete), TASK-020 (deadline cron uses currentValue<targetValue test),
+TASK-022 (dashboard aggregation), TASK-032 (challenge detail), TASK-035 (Strava sync
+triggers recalc). Best autonomous fit by leverage.
+
+Architecture decision worth flagging: SPLIT INTO TWO FILES.
+
+  - lib/services/challenge-progress.ts — pure: calculateProgress(challenge, activities)
+    + ProgressActivity / ProgressChallenge types. NO `import "server-only"`, NO prisma
+    import. Imports only `type` declarations from @prisma/client.
+  - lib/services/challenge-progress-recalc.ts — I/O: recalculateChallengeProgress(userId,
+    options?). Imports the pure function and prisma.
+
+The first cut had everything in one file. `npm test` immediately failed because vitest
+loaded challenge-progress.test.ts → which imported challenge-progress.ts → which
+imported "server-only" + @/lib/db/prisma → which imported @/config/env → env validation
+fired at module load and threw on missing DATABASE_URL/NEXTAUTH_*/GOOGLE_*. The cipher
+tests and streaks tests work because cipher reads process.env.ENCRYPTION_KEY lazily and
+streaks doesn't import prisma at all. Moving the I/O wrapper to its own file mirrors the
+streaks pattern: pure module is freely importable in any context. This satisfies the
+acceptance criterion "Чистые функции — принимают данные, не делают I/O сами (для
+тестируемости)" literally — the pure module CAN'T do I/O because it can't reach prisma.
+
+Pure-function design:
+- isInPeriod uses inclusive timestamp comparison on both ends. startDate/endDate are
+  @db.Date in schema.prisma:109-110 (UTC midnight per Prisma 7 deserialization, same
+  convention TASK-021 documents for Activity.activityDate). So timestamp equality maps
+  to calendar-day equality. Activity exactly on startDate or endDate counts; one day
+  before/after does not.
+- type='cumulative': sum-by-metric across in-period activities.
+- type='single_day': bucket by UTC day key (toISOString().slice(0,10)) → max per-day sum.
+- Metric mapping: steps→steps, distance_km→distanceKm, duration_min→durationMin (all
+  nullable on Activity, treated as 0 with `?? 0`), runs_count→COUNT WHERE
+  activityType='run', custom→0 (placeholder; if a future user-defined metric needs
+  evaluation, the caller computes it — we don't bake user-supplied formulas into a pure
+  scoring function). switch has `const _exhaustive: never = metric` guard so adding a
+  new Metric in schema.prisma fails typecheck here.
+
+Recalc design (lib/services/challenge-progress-recalc.ts):
+1) Fetch active challenges for the user (filter by `id` if `options.challengeId` given).
+2) Compute the widest [earliestStart..latestEnd] window across them. ONE
+   prisma.activity.findMany call for that window with `select` to omit
+   note/createdAt/stravaData (smaller payload, no point pulling them).
+3) For each challenge, calculateProgress over the full activity set (the pure function
+   re-filters per-challenge). Issue prisma.challenge.update inside a single $transaction.
+4) Sticky completion: currentValue >= targetValue → status='completed', completedAt=now.
+5) Re-running recalc on a completed challenge is a no-op since the active-status filter
+   excludes it. PRD intent: deletes/decreases don't un-complete a finished challenge.
+6) Failed-by-deadline transition is OUT of scope here — that's TASK-020's cron endpoint
+   (status='active' AND endDate < today AND currentValue < target → 'failed').
+
+Verification:
+- npm test                  -> 44/44 (10 cipher + 16 streaks + 18 progress)
+- npm run typecheck         -> clean
+- npm run lint              -> clean
+- npm run format:check      -> clean
+- npm run build             -> ✓ static / and /_not-found (with shell-overridden env
+                                vars since .env.local has TASK-003's NEXTAUTH_URL typo)
+
+The 18 unit tests cover ALL TASK-019 test_steps + edges:
+- PRD #1: cumulative distance_km 30+40+35=105 ✓
+- PRD #2: single_day steps 30k+25k same day, 10k other → 55k ✓
+- PRD #3: activities outside [start,end] excluded ✓
+- PRD #4: runs_count counts only ActivityType.run ✓
+- All four numeric metrics for cumulative (steps, distance_km, duration_min, runs_count)
+- single_day variants for distance_km, runs_count, plus "max not last" ordering
+- custom metric returns 0 (graceful)
+- empty activity list returns 0
+- null fields treated as 0 (e.g. steps-only activity contributes 0 to a distance challenge)
+- period boundaries: activity exactly on startDate/endDate counted, one day before/after
+  excluded, mixed in/out filter
+- input array purity (no mutation)
+
+User toolchain note: prompt asked for `uv run ruff check .` / `uv run pytest`. As noted
+in TASK-001/006/010/011/021 progress, this is a TS/Next.js project, not Python. Used the
+equivalents: ESLint / tsc --noEmit / vitest / next build. Same intent, correct tooling.
+
+## Notes for next iterations
+
+- TASK-017 (Activity service): the spec says "После create/update/delete вызывается
+  recalculateChallengeProgress(userId)". Import from
+  @/lib/services/challenge-progress-recalc, NOT from challenge-progress. The pure module
+  exposes only calculateProgress + types. Pass options.challengeId only if you can prove
+  exactly one challenge is affected (almost never — most activities affect multiple
+  active challenges). Default is to recalc all active.
+- TASK-020 (deadline cron): independent of recalculateChallengeProgress. Just queries
+  `status='active' AND endDate < today AND currentValue < targetValue` and writes
+  status='failed'. currentValue is already kept fresh by every Activity mutation via
+  TASK-017's recalc call, so the cron doesn't need to recalc — it only flips status.
+  Idempotent because the second time around, the WHERE filter no longer matches.
+- TASK-022 (dashboard aggregation): use prisma.challenge directly with status='active'
+  and read currentValue. No need to recalc on dashboard load — currentValue is materialized.
+  Same for any read path. Recalc is only called from the activity-mutation hooks +
+  potentially a one-off recovery path if data gets out of sync.
+- TASK-032 (challenge detail page): same pattern — read currentValue from the row. The
+  per-day chart can be built by calling calculateProgress with `endDate=eachDay` to get
+  cumulative-by-day, but for performance just compute it client-side from the activity
+  list filtered to the period. Avoid N calculateProgress invocations server-side.
+- The custom metric (Metric.custom) returns 0 from calculateProgress. If/when a user-defined
+  metric feature lands, it'll need a separate code path — likely a per-challenge formula
+  field in schema. For MVP it's effectively unsupported; UI in TASK-014 should hide the
+  custom option until the formula UX is designed (or omit it from the metric selector entirely).
+- The split file structure (pure + recalc) is the right pattern for any future "pure logic
+  + I/O wrapper" service. Streaks doesn't need this split because it's *only* pure (the
+  caller in TASK-022 will pass activities). For challenges, the recalc loop needs to live
+  somewhere and a separate file keeps the test file's import graph clean.
+- TASK-003 instrumentation.ts dev-startup-validation gap (open since TASK-005) and the
+  user's .env.local NEXTAUTH_URL typo are both still live. Hands-off as before.
+- Working tree at end of this iteration: tasks.json modified, progress.txt modified,
+  lib/services/challenge-progress.ts new, lib/services/challenge-progress-recalc.ts new,
+  lib/services/challenge-progress.test.ts new. Pre-existing modified ralph.sh and deleted
+  README.md remain unstaged — same hands-off policy. Stage list:
+  lib/services/challenge-progress.ts, lib/services/challenge-progress-recalc.ts,
+  lib/services/challenge-progress.test.ts, tasks.json, progress.txt.
+- Architectural rule reminder: tasks.json says "Тесты пишем ТОЛЬКО для streak calculation
+  и token crypto". TASK-019's acceptance criteria explicitly require unit tests though
+  ("Написаны unit-тесты для обоих типов челленджей и всех метрик, граничных дат") — so
+  progress joins streak + crypto in the unit-test bucket. That makes sense: it's a pure
+  algorithmic function, not CRUD. Future CRUD services (water, weight, activities) still
+  get NO unit tests — only integration smoke against Neon when needed.
