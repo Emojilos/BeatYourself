@@ -1105,3 +1105,152 @@ tooling for the stack.
   BaseService". This route handler is a flat function — exactly that style. When
   TASK-035 (Strava sync cron) follows, keep the same shape: free function, env-gated
   bearer auth, single Prisma query if possible.
+
+## 2026-05-03 — TASK-027: WaterLog service + zod schema
+
+Status: done
+
+Why I picked this task: scanned the priority queue against architectural_principles
+verification rules. Critical-pending TASK-002 (shadcn/ui visual review) and TASK-007
+(NextAuth + Google OAuth flow) need browser/OAuth interaction that the harness can't
+honestly verify — same constraint flagged in every prior iteration's progress notes.
+Among medium-pending pure-backend tasks with deps satisfied: TASK-027 (water service)
+and TASK-029 (weight service) both gate TASK-022 (high-priority dashboard aggregation)
+along with TASK-021 (done) and TASK-019 (done). Picked TASK-027 first since it's
+narrower in scope (single int field vs. weight's float+target+delta semantics) and the
+work patterns transfer cleanly to TASK-029. Both must be done before TASK-022 can land,
+so the order between them is just sequencing — pick the smaller one first to keep the
+diff atomic and the verification cycle short.
+
+What I added:
+- beatyourself/lib/validation/water.ts — addWaterSchema (z.object with amountMl:
+  int.positive), inferred AddWaterInput type. ~10 lines.
+- beatyourself/lib/services/water.ts — addWater / getTodayWater / listWaterByDay /
+  deleteWater plus TodayWater and WaterByDay interfaces. All functions are user-scoped
+  (userId is the first arg, every where-clause filters by it). ~95 lines including
+  helpers.
+
+Key design choices (worth flagging for next iterations):
+
+1) WaterLog.loggedAt is `DateTime @default(now())` — full timestamp, NOT @db.Date
+   (verified in schema.prisma:149). This is the OPPOSITE convention from
+   Activity.activityDate (@db.Date) and Challenge.startDate/endDate (@db.Date). Reason:
+   water sips happen at specific moments (you can have 9am, 12pm, and 6pm logs on the
+   same day) and the UI's history view wants to show times. So 'today' for water is a
+   tz-aware UTC interval, not a calendar-day equality. getTodayWater computes day
+   bounds via:
+       todayKey = formatInTimeZone(now, tz, "yyyy-MM-dd")     # user-tz Y-M-D string
+       tomorrowKey = shiftDayKey(todayKey, +1)
+       start = fromZonedTime(`${todayKey}T00:00:00.000`, tz)  # UTC instant of user-tz day start
+       end   = fromZonedTime(`${tomorrowKey}T00:00:00.000`, tz)
+       where: { loggedAt: { gte: start, lt: end } }
+   The half-open interval [start, end) is correct for timestamp filtering (a row with
+   loggedAt exactly at end belongs to tomorrow). DST handled correctly since the next
+   user-tz calendar day's wall-clock 00:00 maps to its own UTC instant — NOT
+   start + 24h, which would land on 23:00 or 01:00 on DST transition days.
+
+2) tz convention for water differs from streaks.ts implicitly: streaks bucket Activity
+   by UTC day key (because Activity.activityDate is @db.Date / UTC-midnight per Prisma
+   7's Date deserialization), but water buckets WaterLog by user-tz day key (because
+   loggedAt is a real timestamp). Both are correct for their data shape — flagging
+   so future code (TASK-022 dashboard agg) doesn't try to bucket them with the same
+   helper.
+
+3) getTodayWater returns { consumed: number, goal: number }. Used prisma.aggregate
+   ({_sum: {amountMl}}) for server-side sum (single round-trip, no in-memory rollup).
+   _sum.amountMl is null when no rows match — coalesced to 0. UserSettings lookup runs
+   in parallel via Promise.all. Falls back to DEFAULT_WATER_GOAL_ML=2000 if no settings
+   row (matches schema.prisma:88 default; defensive even though TASK-007's signIn
+   callback guarantees settings exist post-signup).
+
+4) listWaterByDay(userId, days, tz?, now?) groups by user-tz YYYY-MM-DD key in JS after
+   a single findMany over the [now-days+1 .. now] window. Returns ONLY days with logs,
+   NOT zero-filled. The UI consumer (TASK-028 30/90-day BarChart) is responsible for
+   zero-fill if it wants a continuous chart — saves DB rows/wire bandwidth and keeps
+   the service signature consistent with the spec ('[{date, total}]', no empty-day
+   contract). days<=0 short-circuits to [] without hitting the DB.
+
+5) tz/now are optional in getTodayWater + listWaterByDay, defaulting to
+   DEFAULT_USER_TZ='Europe/Moscow' (re-exported from streaks.ts — single source of
+   truth across the codebase). 'now' injection is for testability; the smoke test
+   uses both the default-now path and explicit 'yesterday' Date constructed with
+   setUTCDate(-1) to verify cross-day exclusion.
+
+6) addWater is a plain prisma.create — no recalculateChallengeProgress call. Water
+   doesn't feed Challenge.metric mappings (steps/distance_km/duration_min/runs_count/
+   custom — none are water). Only Activity mutations need recalc.
+
+7) deleteWater uses the challenges.ts findFirst-then-delete pattern: returns null on
+   cross-user / nonexistent without exposing which case. The two-query non-atomic
+   pattern is fine for single-user ops.
+
+8) Helper inlining vs. extraction: shiftDayKey + userTzDayBounds are 5-7 line
+   functions. The same shape exists in streaks.ts. Two callsites is below the
+   abstraction threshold per architectural_principles 'no premature abstraction'.
+   When a third needs them (TASK-022 dashboard agg, or TASK-026 heatmap day bucketing),
+   pull both into lib/utils/date-tz.ts in the same commit. Don't extract preemptively.
+
+9) `import 'server-only'` at top blocks accidental client-bundle inclusion (cascades
+   from the prisma singleton, but explicit at the service boundary too — matches the
+   pattern in challenges.ts and activities.ts).
+
+Verification (per architectural_principles "Тесты пишем ТОЛЬКО для streak calculation
+и token crypto. CRUD не покрываем unit-тестами" — NO permanent test file added):
+- Wrote temporary lib/services/_smoke-water.test.ts (6 vitest cases). Created one test
+  User with UserSettings(waterDailyGoalMl=2500), a 'ghost' User with no settings, and
+  an 'other' User for IDOR. Ran with shell-extracted env vars (DATABASE_URL/DIRECT_URL
+  pulled from .env.local with quote-stripping sed; NEXTAUTH_*/GOOGLE_* dummies that
+  pass zod min-length checks). All 6 cases passed:
+    1) addWater persists row with amountMl=250, userId=test-user.
+    2) Two addWater(250) → getTodayWater returns consumed=500, goal=2500 (UserSettings
+       value, not default). Test_step #2 verified.
+    3) WaterLog with loggedAt=yesterday-UTC-noon NOT counted in today's sum (500 stays
+       500). Test_step #3 verified — and importantly, this also exercises the DST-safe
+       boundary calc (yesterday-UTC-noon is yesterday in MSK too, since MSK is UTC+3
+       year-round, no DST in Russia post-2014).
+    4) listWaterByDay(7) returns 2 buckets — today=500, yesterday=9999 — sum across
+       days matches insertions. Bucket count = 2 confirms zero-day exclusion.
+    5) getTodayWater on the ghost user (no UserSettings row) returns goal=2000
+       (DEFAULT_WATER_GOAL_ML fallback) and consumed=0 — defensive default works.
+    6) deleteWater cross-user returns null and the row stays in DB; owner deleteWater
+       returns the row and findUnique afterwards confirms it's gone. Test_step #4
+       verified.
+- Smoke test file deleted after the run (no permanent test artifact).
+- Build gates clean: npm run typecheck, npm run lint, npm run format:check, npm test
+  (44/44 unaffected: 10 cipher + 16 streaks + 18 progress, all from prior iterations),
+  npm run build (with shell-overridden env since .env.local has the known TASK-003
+  NEXTAUTH_URL typo + a separate quoted-string parsing issue at line 31 that breaks
+  bash `source` — sed-extraction sidesteps both).
+
+User toolchain note: prompt asked for `uv run ruff check .` / `uv run pytest`. As noted
+in TASK-001/006/010/011/017/019/020/021 progress, this is a TS/Next.js project, not
+Python. Used the equivalents: ESLint / tsc --noEmit / vitest / next build. Same intent,
+correct tooling for the stack.
+
+## Notes for next iterations
+
+- TASK-029 (WeightLog service) is the natural next pick — same priority (medium), same
+  deps (TASK-005 done), pure backend, also unblocks TASK-022 (dashboard agg). The
+  design will differ in two important ways: (a) WeightLog.measuredAt is @db.Date, so
+  'one weight per day' is a calendar-day @@unique([userId, measuredAt]) constraint
+  (verified schema.prisma:167) — use prisma.upsert by that compound key, NOT a
+  findFirst-then-update dance. (b) getLatestWeight returns delta = latest - second-latest;
+  if there's only one row, delta should be null or 0 — pick one and stick with it
+  (PRD doesn't specify; null is more honest than 0).
+- TASK-022 dashboard agg pulls from streaks/water/weight/challenges — when wiring it,
+  use Promise.all across all four service calls. heatmapData should re-use the same
+  user-tz day bucketing as listWaterByDay (third callsite of shiftDayKey/userTzDayBounds
+  → time to extract to lib/utils/date-tz.ts in that commit, NOT preemptively).
+- TASK-028 (water UI page) will need a setWaterGoalAction server action that updates
+  UserSettings.waterDailyGoalMl. Keep it as a thin wrapper — don't add a full
+  updateUserSettings service unless TASK-030 also needs it (then extract once for both).
+- The pg-connection-string SSL deprecation warning still emits on smoke runs (flagged
+  since TASK-005). Harmless; track for pg v9 / pg-connection-string v3 cutover.
+- TASK-003 instrumentation.ts dev-startup-validation gap (open since TASK-005) and the
+  user's .env.local NEXTAUTH_URL typo + line-31 quote issue are all still live. Hands-off
+  as before.
+- Working tree at end of this iteration: tasks.json modified, progress.txt modified,
+  beatyourself/lib/validation/water.ts new, beatyourself/lib/services/water.ts new.
+  Pre-existing modified ralph.sh and deleted README.md remain unstaged — same hands-off
+  policy as prior iterations. Stage list: beatyourself/lib/validation/water.ts,
+  beatyourself/lib/services/water.ts, tasks.json, progress.txt.
