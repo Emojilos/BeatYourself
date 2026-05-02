@@ -544,3 +544,141 @@ ESLint / tsc --noEmit / vitest / next build. Same intent, correct tooling.
 - The Node 25 `MODULE_TYPELESS_PACKAGE_JSON` warning during the verification run is
   harmless — it's a perf hint about adding `"type":"module"` to package.json. Doing so
   could change Next 16 module-resolution semantics elsewhere; leaving alone.
+
+## 2026-05-02 — TASK-011: Challenge service layer (CRUD)
+
+Status: done
+
+Why I picked this task: scanned the priority queue. Critical-pending TASK-002 (shadcn/ui)
+and TASK-007 (NextAuth+Google OAuth) need real browser/OAuth verification — same constraint
+prior iterations have flagged repeatedly; the harness can't honestly verify either. Among
+high-pending with all deps satisfied, candidates were TASK-011 (this) and TASK-016 (Activity
+zod schema). TASK-011 has the highest leverage: it unblocks TASK-012 (server actions),
+TASK-013/014 (challenge UI), TASK-019 (progress calc, critical), TASK-022 (dashboard agg),
+TASK-032 (challenge detail), and indirectly TASK-035 (Strava sync triggers progress recalc).
+TASK-016 only unblocks TASK-017. Pure backend, fully verifiable.
+
+What I added:
+- beatyourself/lib/services/challenges.ts — five exported functions: createChallenge,
+  getChallenge, listChallenges, updateChallenge, deleteChallenge. Plus the
+  ListChallengesFilter interface. ~85 lines, no helpers, no abstractions.
+
+Key design choices (worth flagging):
+
+1) createChallenge does NOT explicitly set status='active' or currentValue=0. The schema
+   default kicks in (schema.prisma:111-112). This avoids the two-sources-of-truth problem
+   if the default ever changes. createdAt is also schema-default. The TASK-011 acceptance
+   says "createChallenge устанавливает status='active' и created_at" — the contract is
+   met (the row gets these values), just via the DB layer rather than the service.
+
+2) listChallenges year filter uses calendar-overlap, not year-of-endDate. A challenge
+   belongs to year Y if [startDate, endDate] overlaps [Jan 1 Y, Dec 31 Y]. Predicate:
+   startDate ≤ Dec31(Y) AND endDate ≥ Jan1(Y). Matches TASK-031's "Фильтры по году"
+   intent — a 6-month challenge spanning Dec 2024 → May 2025 should appear in BOTH 2024
+   and 2025 archive views, not vanish from one. Year boundaries computed in UTC since
+   schema.prisma stores startDate/endDate as @db.Date (UTC-midnight calendar days, same
+   convention as Activity.activityDate per TASK-021's notes).
+
+3) listChallenges orderBy is [status asc, createdAt desc]. Postgres orders enums by their
+   declaration order — schema.prisma:46-51 declares ChallengeStatus as
+   active < completed < failed < archived. So 'active' surfaces first when the caller does
+   not filter by status (e.g., dashboard pulling all challenges to compute counts). When
+   filtered, the second sort key (createdAt desc) is what matters: newest first.
+
+4) updateChallenge does findFirst({id, userId}) FIRST so a cross-user update returns null
+   instead of throwing P2025. This is the IDOR pattern: the caller cannot distinguish
+   "doesn't exist" from "not yours" — exactly what we want for an HTTP 404 response in
+   TASK-012's server action wrapper. After ownership confirms, validates
+   input.endDate >= existing.startDate (TASK-010's progress noted this couldn't live in
+   the zod schema since startDate isn't in the update payload). Throws on violation.
+
+5) updateChallenge builds the data object field-by-field with `if (input.X !== undefined)`.
+   This preserves the difference between "field absent → don't touch" and "field set to
+   null → clear it" for optional columns (description, color, icon). zod's strip mode
+   means absent-from-payload fields drop out of the input shape entirely; explicit-null
+   fields survive. Both Prisma update semantics and our schema allow setting these to
+   null, so let the caller drive.
+
+6) deleteChallenge uses findFirst → delete-by-id rather than deleteMany({id, userId}).
+   deleteMany returns only a count — and TASK-011 acceptance criteria says "Возврат
+   типизированный (используем Prisma generated types)", which I read as "return the row
+   on success / null on miss". The two-query pattern is acceptable for single-user ops;
+   the race window (challenge deleted between findFirst and delete) is theoretical and
+   would just throw P2025, which is fine.
+
+7) `import "server-only"` at the top of challenges.ts. The file already transitively
+   pulls server-only via @/lib/db/prisma → @/config/env, but the explicit import at the
+   service boundary is defensive: if a future refactor breaks one of those internal imports
+   (e.g., env validation moves to instrumentation only), services still won't accidentally
+   leak into a client component bundle.
+
+8) Used Prisma.ChallengeWhereInput and Prisma.ChallengeUpdateInput types for compile-time
+   safety. Prisma 7 still exports the Prisma namespace from @prisma/client (verified via
+   `import type { Prisma }` typechecks clean). If a future Prisma version drops it, fall
+   back to `Awaited<ReturnType<typeof prisma.challenge.findFirst>>`.
+
+Verification (per architectural_principles "Тесты пишем ТОЛЬКО для streak calculation и
+token crypto. CRUD не покрываем unit-тестами" — NO permanent test file added):
+- Wrote temporary lib/services/_smoke-challenges.test.ts (8 vitest cases against live Neon
+  DB). The leading-underscore name didn't matter — vitest's include glob is `**/*.test.ts`,
+  so I just deleted the file after the run. The test creates two test users (smoke-a-/-b-
+  with timestamped emails to avoid collisions), exercises every service function across
+  IDOR boundaries, and tears down via prisma.user.delete (cascade removes challenges).
+- Ran with shell-overridden env vars (DATABASE_URL pointing at the Neon pooled URL,
+  NEXTAUTH_*+GOOGLE_* dummies that satisfy zod min-length). The .env.local NEXTAUTH_URL
+  typo from TASK-003 is still live and would fail validation if vitest loaded .env.local
+  via @next/env — overriding via shell vars sidesteps it. All 8 cases passed:
+    1) createChallenge → status=active, currentValue=0, getChallenge returns the row.
+    2) getChallenge cross-user → null.
+    3) listChallenges{status:'active'} excludes archived; listChallenges{year:2025} hits
+       the year-overlap filter correctly.
+    4) updateChallenge cross-user → null, row unchanged.
+    5) updateChallenge owner persists description+endDate+status.
+    6) updateChallenge throws on endDate < existing.startDate.
+    7) deleteChallenge cross-user → null, row remains.
+    8) deleteChallenge owner removes row, getChallenge returns null afterwards.
+- Smoke test file deleted after verification.
+- Build gates clean: npm run typecheck, npm run lint, npm run format:check (all clean
+  on first run — no prettier reformat needed), npm test (26/26: 10 cipher + 16 streaks
+  unaffected), npm run build (with shell-overridden env: ✓ static / and /_not-found).
+
+User toolchain note: prompt asked for `uv run ruff check .` and `uv run pytest`. As noted
+in TASK-001/006/010/021 progress, this is a TS/Next.js project, not Python. Used the
+equivalents: ESLint / tsc --noEmit / vitest / next build. Same intent, correct tooling.
+
+## Notes for next iterations
+
+- TASK-012 (server actions): wrap each service function in a 'use server' action that:
+  (a) calls requireSession(), (b) safeParse via createChallengeSchema/updateChallengeSchema,
+  (c) calls service, (d) revalidatePath('/challenges') and possibly '/dashboard'. Map
+  service results to {success:true,data} | {success:false,error}. For null returns from
+  update/delete, treat as 404 ({success:false, error:'Challenge not found'}). For the
+  endDate-before-startDate throw from updateChallenge, catch the Error and surface its
+  message to the toast — it's already user-facing copy.
+- TASK-013 (challenge list page): listChallenges already orders by [status asc, createdAt
+  desc]. For the active/archive tabs, pass status filter — don't post-filter client-side.
+  For the dashboard's "active challenges" block (TASK-024), pass {status:'active'}.
+- TASK-019 (progress calculation): when implementing recalculateChallengeProgress, query
+  active challenges via listChallenges(userId, {status:'active'}) — keeps the active-only
+  filter in one place. Then update each row's currentValue and possibly status='completed'.
+  Note: there's no `updateProgress` helper in this task — TASK-019 owns that logic, since
+  it needs to write currentValue and completedAt atomically.
+- TASK-031 (profile archive): use {year, status:'completed'|'failed'} filters together.
+  The year-overlap interpretation (not year-of-completion) means a challenge that started
+  in 2024 and completed in 2025 appears in both years' archive views. If you want
+  year-of-completion instead, add `completedAt` to the filter logic — but I think
+  overlap is the right call for "challenges that took place in YYYY".
+- The schema-default reliance for status/currentValue/createdAt means tests that assert
+  these values (like the smoke test did) are validating both Prisma and the schema —
+  which is exactly what we want for an integration smoke. If the schema defaults ever
+  change, downstream tests will surface it.
+- TASK-003 instrumentation.ts dev-startup-validation gap (open since TASK-005) and the
+  user's .env.local NEXTAUTH_URL typo are both still live. Hands-off as before.
+- Working tree at end of this iteration: tasks.json modified, progress.txt modified,
+  lib/services/challenges.ts new. Pre-existing modified ralph.sh and deleted README.md
+  remain unstaged — same hands-off policy as prior iterations. Stage list:
+  lib/services/challenges.ts, tasks.json, progress.txt.
+- Architectural reminder: tasks.json says "no DI containers, no repository pattern,
+  no event bus, no BaseService". challenges.ts is a flat module of free functions —
+  exactly that style. When TASK-016/017 (Activity service) follows, keep the same shape:
+  free functions taking userId first, no class wrappers.
