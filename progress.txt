@@ -959,3 +959,149 @@ the equivalents: ESLint / tsc --noEmit / vitest / next build. Same intent, corre
   tasks.json status="done" but uncommitted). If the user wants to bundle it with
   TASK-017's commit, easy to do — but mixing scoped files breaks the "atomic commit
   per task" convention from agent_instructions.during_work.
+
+## 2026-05-03 — TASK-020: Deadline-failed cron endpoint
+
+Status: done
+
+Why I picked this task: scanned the priority queue. Critical-pending TASK-002 (shadcn/ui)
+and TASK-007 (NextAuth+Google OAuth) need browser/OAuth interaction the harness can't
+honestly verify (same constraint flagged in every prior iteration). Among high-pending,
+TASK-020 had all deps satisfied (TASK-019 + TASK-003 both done), is pure backend with
+mechanical smoke verification (POST endpoint, no UI), and unblocks TASK-035 (Strava sync
+cron) and TASK-040 (deploy doc references both crons). Higher leverage than TASK-027/029
+(water/weight services, medium priority).
+
+What I added:
+- beatyourself/app/api/cron/check-deadlines/route.ts — exports POST(request: Request).
+  Single-query implementation via prisma.$executeRaw + Prisma.sql template:
+    UPDATE challenges
+    SET status = 'failed'
+    WHERE status = 'active'
+      AND end_date < CURRENT_DATE
+      AND current_value < target_value
+  Returns { processed: N } where N is the row count from $executeRaw. Auth gate reads
+  env.CRON_SECRET (optional in zod schema → returns 503 if not set), then compares the
+  'Bearer <secret>' header with node:crypto timingSafeEqual.
+- Removed app/api/cron/.gitkeep (folder now contains a real route).
+
+Key design choices (worth flagging):
+
+1) Single raw SQL UPDATE, not findMany + per-row update or updateMany. Reason: this is
+   a pure status flip with no business logic that needs JS-side evaluation. A single
+   UPDATE is atomic, idempotent by construction (after the first run, status='failed'
+   rows no longer match the WHERE), and avoids round-trips. Prisma 7's $executeRaw
+   returns the affected row count directly, which is exactly what TASK-020's response
+   shape demands. Used Prisma.sql (the tagged template) over $executeRawUnsafe — both
+   work here since there are no user-supplied params, but Prisma.sql is the canonical
+   parameterization idiom and protects against any future drift.
+
+2) Used Postgres CURRENT_DATE instead of computing 'today' in JS and passing as a Date
+   parameter. end_date is @db.Date (UTC midnight per Prisma 7 deserialization, same
+   convention as Activity.activityDate per TASK-021's notes; same convention as
+   Challenge.startDate). 'end_date < CURRENT_DATE' is a calendar-day comparison in the
+   DB's timezone — Neon runs UTC, so CURRENT_DATE is the UTC calendar day. The
+   schema-wide convention is UTC-midnight = calendar day, so this is correct uniformly.
+   A multi-tz-per-user product would need per-user evaluation; the PRD has a single
+   user with a single tz, and "deadline crossed" is an inherently date-only concept
+   (you can't cross a deadline by 30 minutes — you cross it on a calendar day). If a
+   future per-user-tz feature lands, this query becomes per-user with a tz arg; for now,
+   uniform UTC is the right call.
+
+3) Auth: env.CRON_SECRET is .optional() in zod (config/env.ts:24). If unset, the route
+   returns 503 (misconfigured) rather than 401 (unauthorized). This lets UptimeRobot/
+   cron operators distinguish "I forgot to set the env on this Render env group" from
+   "someone is hitting this without a token". Returning 401 in both cases would silently
+   mask a deploy-config bug.
+
+4) timingSafeEqual on Buffer.from('Bearer ' + secret) vs Buffer.from(headerValue), with
+   an explicit length check first. node:crypto.timingSafeEqual throws on length mismatch
+   in Node >=16, so the short-circuit isn't optional. The Bearer prefix length is
+   public, so the length leak from short-circuiting on length is irrelevant — what
+   timingSafeEqual buys us is constant-time comparison of the secret bytes themselves.
+
+5) NOT cached (default for POST in Next 16). No need for `export const dynamic =
+   'force-dynamic'`. Verified via build output: route shows as ƒ (server-rendered on
+   demand), not ○ (static).
+
+6) Did NOT add `export const runtime = 'nodejs'` — node is the default for route
+   handlers, and the prisma + node:crypto imports already require node runtime. Adding
+   the export is redundant noise.
+
+Verification (per architectural_principles "Тесты пишем ТОЛЬКО для streak calculation
+и token crypto. CRUD не покрываем unit-тестами" — NO permanent test file added):
+- Wrote temporary app/api/cron/check-deadlines/_smoke.test.ts (5 vitest cases). Imports
+  POST directly from ./route and calls it with a Request object — no HTTP server, no
+  real Next.js framework involvement, just the handler in-process. Created one test
+  User and five challenges with varied (status, endDate, currentValue, targetValue)
+  combinations. Ran with shell-overridden env vars (DATABASE_URL pointing at Neon
+  pooled URL; NEXTAUTH_*/GOOGLE_* dummies that pass zod min-length checks; CRON_SECRET
+  set to a 38-char test token). The .env.local NEXTAUTH_URL typo from TASK-003 is still
+  live; shell overrides sidestep it. All 5 cases passed:
+    1) No authorization header → 401.
+    2) "Bearer wrong-token-here-1234" → 401.
+    3) Same-length-different-bytes Bearer → 401 (timingSafeEqual still rejects, no
+       short-circuit-on-length-equal that would let an attacker probe via length).
+    4) Valid Bearer → 200, body { processed: >= 1 }. Verified by re-reading all 5
+       challenges by title:
+         past-unmet (active, end=yesterday, 30/100)         → status='failed' ✓
+         past-met (active, end=yesterday, 100/100)          → status='active'  ✓
+            (target reached but not via this cron — TASK-019's recalc owns the
+             active→completed flip on currentValue >= targetValue. Deadline cron
+             only flips to 'failed', never to 'completed'. Correct separation.)
+         future-unmet (active, end=tomorrow, 5/100)         → status='active'  ✓
+         already-completed-past (completed, end=yesterday)  → status='completed' ✓
+         already-archived-past (archived, end=yesterday)    → status='archived'  ✓
+    5) Second valid call → 200, body { processed: 0 } — idempotent.
+- Smoke test file deleted after the run (no permanent test artifact).
+- Build gates clean: npm run typecheck, npm run lint, npm run format:check (all clean
+  on first run, no prettier reformat needed), npm test (44/44: 10 cipher + 16 streaks +
+  18 progress, all unaffected), npm run build (✓ static / and /_not-found, plus the
+  new ƒ /api/cron/check-deadlines route registered as server-rendered on demand).
+
+User toolchain note: prompt asked for `uv run ruff check .` / `uv run pytest`. As noted
+in TASK-001/006/010/011/017/019/021 progress, this is a TS/Next.js project, not Python.
+Used the equivalents: ESLint / tsc --noEmit / vitest / next build. Same intent, correct
+tooling for the stack.
+
+## Notes for next iterations
+
+- TASK-035 (Strava sync cron) follows an identical auth pattern. Extract a helper if
+  another /api/cron/* endpoint is added — for now, two callsites is below the abstraction
+  threshold per architectural_principles "no premature abstraction". When extracting,
+  put it in lib/auth/cron.ts (matches the lib/auth/ folder convention from TASK-007/008).
+- TASK-040 (deploy doc) needs to register the cron job. Render's cron setting requires
+  the full URL including https://. UptimeRobot can also POST to the endpoint, but
+  Render's cron is the right primary trigger because it can run on a fixed schedule
+  with the Bearer token in headers (UptimeRobot's HTTP monitor doesn't easily set
+  request body or auth headers — it's designed for liveness pings, not cron).
+- The deadline cron is read-aware: it does NOT recompute currentValue. TASK-017's
+  recalc keeps currentValue fresh on every Activity mutation; the cron just consumes
+  the materialized value for the WHERE filter. If a user's data ever drifts (e.g.,
+  the activity-mutation hook is bypassed), the cron could mis-classify a challenge
+  as 'failed' when the user actually completed it. Mitigation: TASK-019's recalc
+  could be added as the FIRST step of this cron (recalc all active challenges across
+  all users → then UPDATE failed). For MVP with one user and 100% Activity mutations
+  going through TASK-017, this is overkill — flagging for future scaling.
+- Postgres orders enum values by declaration order. ChallengeStatus declares
+  active < completed < failed < archived (schema.prisma:46-51), so 'failed' rows
+  surface AFTER 'active' and 'completed' in any orderBy: { status: 'asc' } query —
+  including listChallenges from TASK-011. The dashboard's active-challenges block
+  filters explicitly so this doesn't matter, but the profile's archive view (TASK-031)
+  may want to combine 'failed' + 'completed' or filter to one — verify when picking
+  it up.
+- The pg-connection-string SSL deprecation warning still emits during the smoke run.
+  Harmless. Track for pg v9 / pg-connection-string v3 cutover — at that point add
+  `sslmode=verify-full` to DATABASE_URL.
+- TASK-003 instrumentation.ts dev-startup-validation gap (open since TASK-005) and
+  the user's .env.local NEXTAUTH_URL typo are both still live. Hands-off as before.
+- Working tree at end of this iteration: tasks.json modified, progress.txt modified,
+  app/api/cron/check-deadlines/route.ts new, app/api/cron/.gitkeep deleted (folder
+  now has a real file). Pre-existing modified ralph.sh and deleted README.md remain
+  unstaged — same hands-off policy as prior iterations. Stage list:
+  app/api/cron/check-deadlines/route.ts, app/api/cron/.gitkeep deletion, tasks.json,
+  progress.txt.
+- Architectural rule reminder: tasks.json says "no DI containers, no event bus, no
+  BaseService". This route handler is a flat function — exactly that style. When
+  TASK-035 (Strava sync cron) follows, keep the same shape: free function, env-gated
+  bearer auth, single Prisma query if possible.
