@@ -812,3 +812,150 @@ equivalents: ESLint / tsc --noEmit / vitest / next build. Same intent, correct t
   progress joins streak + crypto in the unit-test bucket. That makes sense: it's a pure
   algorithmic function, not CRUD. Future CRUD services (water, weight, activities) still
   get NO unit tests — only integration smoke against Neon when needed.
+
+## 2026-05-03 — TASK-017: Activity service layer (CRUD + Strava upsert + recalc)
+
+Status: done
+
+Why I picked this task: scanned the priority queue. Critical-pending TASK-002 (shadcn/ui)
+and TASK-007 (NextAuth+Google OAuth) need browser/OAuth interaction the harness can't
+honestly verify (same constraint flagged in every prior iteration). Highest-leverage
+fully-verifiable candidate was TASK-017: high priority, deps satisfied (TASK-016, TASK-019
+both done), pure backend, mechanically smoke-testable, unblocks TASK-018 (manual entry
+form) and is on the path to TASK-035 (Strava sync) via createStravaActivity. Beats
+TASK-020 (deadline cron, also high) on downstream leverage and beats TASK-027/029
+(water/weight services, medium priority) on priority.
+
+What I added:
+- beatyourself/lib/services/activities.ts — six exported functions: createActivity,
+  createStravaActivity, getActivity, listActivities, updateActivity, deleteActivity.
+  Plus ListActivitiesFilter and CreateStravaActivityInput interfaces. ~115 lines.
+
+Key design choices (worth flagging):
+
+1) Same architectural shape as challenges.ts: flat module of free functions, no class
+   wrappers, no DI. userId is always the first arg and scopes every where-clause for
+   IDOR protection. updateActivity/deleteActivity use the findFirst-then-update pattern
+   for null-on-miss-or-cross-user without exposing the difference between "not yours"
+   and "doesn't exist".
+
+2) createActivity takes a third `source` param defaulting to 'manual' per the TASK-017
+   acceptance criteria. The Strava sync path (TASK-035) will use createStravaActivity
+   instead — kept these as separate functions because their input shapes diverge
+   (manual goes through createActivitySchema → CreateActivityInput; Strava-side has an
+   externalId required, optional stravaData JSON column for raw payload).
+
+3) createStravaActivity uses Prisma's compound-unique upsert. `@@unique([externalId,
+   source])` in schema.prisma:140 generates the where-key name `externalId_source`
+   automatically. The same `data` object is reused for create + update branches so a
+   second call with the same externalId edits the existing row (e.g., Strava activity
+   metadata changed after the first sync). Verified during smoke: two calls with same
+   externalId → one row in DB, distanceKm reflects the second call.
+
+4) Activity.externalId is nullable in the schema (manual rows store NULL there). The
+   compound unique works correctly because Postgres treats NULL as distinct in unique
+   constraints. createStravaActivity requires a non-null externalId at the TypeScript
+   boundary so the upsert key is always populated.
+
+5) After every mutation (create/createStrava/update/delete), the service awaits
+   recalculateChallengeProgress(userId) before returning. This is the contract the
+   spec explicitly calls out and what TASK-019's recalc was designed for. The recalc
+   re-reads the active challenges and the activity window in one query each, so the
+   amplification is bounded — no N+1 risk per mutation.
+
+6) listActivities: filter is {from?, to?, source?}. The activityDate filter object is
+   only added to the where-clause when at least one bound is provided (avoids an
+   empty-object filter that Prisma would still try to match). orderBy is
+   [activityDate desc, createdAt desc] — newest-day-first, ties broken by insert
+   order. Matches dashboard/heatmap consumption: latest activities surface first in
+   any list.
+
+7) Activity.activityDate is @db.Date (UTC-midnight per Prisma 7 deserialization, same
+   convention as Challenge.startDate/endDate in TASK-019 and as documented in TASK-021's
+   notes). The service does NOT normalize the incoming Date to UTC-midnight — the
+   caller (TASK-018's manual form / TASK-035's Strava ingestion) is responsible for
+   making sure activityDate is calendar-day-correct in the user's tz. Per TASK-021's
+   own notes: "The manual-entry form should accept a date input in the user's timezone
+   and serialize to UTC-midnight of the same calendar day before write. Strava sync
+   needs the same: convert strava activity start_date → user-tz calendar day →
+   UTC-midnight Date." This is an architectural decision: keep the service tz-agnostic
+   so the same function works for any caller-defined day boundary.
+
+8) `import 'server-only'` at top — defensive against accidental client-bundle leak.
+   The cascade through @/lib/db/prisma → @/config/env already pulls server-only in
+   transitively, but the explicit import at the service boundary keeps the protection
+   intact if the internal imports are refactored.
+
+Verification (per architectural_principles "Тесты пишем ТОЛЬКО для streak calculation
+и token crypto. CRUD не покрываем unit-тестами" — NO permanent test file added):
+- Wrote temporary lib/services/_smoke-activities.test.ts (6 vitest cases against live
+  Neon DB). Ran with shell-overridden env vars (DATABASE_URL/NEXTAUTH_*/GOOGLE_*) so
+  the TASK-003 .env.local NEXTAUTH_URL typo doesn't trip env validation. All 6 cases
+  passed:
+    1) createActivity persists with source=manual; recalc updates challenge.currentValue
+       to 12 after first activity, then 20 after a second cumulative-distance activity
+       in the same period. End-to-end verification of "После create — прогресс активных
+       челленджей обновлён".
+    2) createStravaActivity called twice with the same externalId → one row in DB,
+       distanceKm reflects the second call (upsert update branch). Test_step #2 verified.
+    3) listActivities filters by source ('manual' returns only manual rows; 'strava' only
+       strava); date range filter returns exactly the activity in the given window;
+       ordering by activityDate desc verified by comparing adjacent rows.
+    4) getActivity is user-scoped: same id returns the row for the owner, returns null
+       for the other user (IDOR).
+    5) updateActivity cross-user returns null and does NOT mutate the row; owner update
+       persists note + distanceKm changes.
+    6) deleteActivity cross-user returns null and does NOT remove the row; owner delete
+       removes it (verified via direct findUnique afterwards). Test_step #3 verified.
+- Smoke test file deleted after verification. No permanent test artifacts added.
+- Build gates clean: npm run typecheck, npm run lint, npm run format:check, npm test
+  (44/44 unaffected: 10 cipher + 16 streaks + 18 progress), npm run build (with
+  shell-overridden env since .env.local still has TASK-003's NEXTAUTH_URL typo).
+
+User toolchain note: prompt asked for `uv run ruff check .` / `uv run pytest`. As noted
+in TASK-001/006/010/011/019/021 progress, this is a TS/Next.js project, not Python. Used
+the equivalents: ESLint / tsc --noEmit / vitest / next build. Same intent, correct tooling.
+
+## Notes for next iterations
+
+- TASK-018 (manual activity form): the form sends data through createActivityAction
+  (server action wrapping createActivity). The action MUST normalize activityDate to
+  UTC-midnight of the user-tz calendar day before calling the service. Pattern: read
+  user.settings.timezone (default 'Europe/Moscow'), parse the form's date string with
+  date-fns-tz to get a user-tz calendar day, then write Date(Date.UTC(yyyy, mm-1, dd)).
+  If the activityDate is missing from the form, the createActivitySchema defaults to
+  new Date() — but that's the current instant, NOT UTC-midnight; the action should
+  override the default with a proper UTC-midnight value.
+- TASK-018 should also wrap createActivityAction with revalidatePath('/dashboard') and
+  revalidatePath('/challenges') after successful creation so the UI reflects updated
+  streak + challenge progress + heatmap.
+- TASK-035 (Strava sync): use createStravaActivity, NOT createActivity with
+  source='strava'. The dedicated function handles upsert; createActivity does plain
+  insert and would throw on duplicate externalId via the unique constraint. The mapping
+  from Strava → CreateStravaActivityInput is TASK-035's responsibility:
+    sport_type → ActivityType (run/walk/other); cap unknown sport_types as 'other'.
+    distance (meters) → distanceKm = distance / 1000.
+    moving_time (seconds) → durationMin = moving_time / 60.
+    start_date_local → activityDate via tz normalization (user's tz). Strava already
+      sends start_date_local as the athlete's local time — convert to UTC-midnight of
+      that calendar day for storage.
+    Pass the raw Strava JSON to stravaData for future-proofing.
+- TASK-019's recalc is now exercised end-to-end via TASK-017 mutations (this iteration's
+  smoke confirmed cumulative distance challenge progress updates correctly). Marking
+  it as the "deferred verification" path mentioned in TASK-019's progress notes —
+  recalc is verified by transitive callers.
+- The pg-connection-string SSL deprecation warning (flagged since TASK-005) still
+  emits during smoke runs. Harmless. Track for pg v9 / pg-connection-string v3 cutover
+  — at that point add `sslmode=verify-full` to DATABASE_URL.
+- TASK-003 instrumentation.ts dev-startup-validation gap (open since TASK-005) and
+  the user's .env.local NEXTAUTH_URL typo are both still live. Hands-off as before.
+- Working tree at end of this iteration: tasks.json modified, progress.txt modified,
+  lib/services/activities.ts new. Pre-existing modified ralph.sh and deleted README.md
+  remain unstaged — same hands-off policy as prior iterations. Stage list:
+  lib/services/activities.ts, tasks.json, progress.txt.
+- TASK-016's lib/validation/activity.ts was an untracked file from a prior iteration
+  (visible in initial git status). It IS a TASK-016 deliverable, not part of TASK-017.
+  Leaving it unstaged for TASK-016's commit (which appears to be already done per
+  tasks.json status="done" but uncommitted). If the user wants to bundle it with
+  TASK-017's commit, easy to do — but mixing scoped files breaks the "atomic commit
+  per task" convention from agent_instructions.during_work.
