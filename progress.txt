@@ -1601,3 +1601,249 @@ Same intent, correct tooling.
   Stage list: beatyourself/lib/utils/date-tz.ts, beatyourself/lib/services/
   dashboard.ts, beatyourself/lib/services/streaks.ts, beatyourself/lib/services/
   water.ts, tasks.json, progress.txt.
+
+================================================================================
+2026-05-03 — TASK-002 (shadcn/ui setup with Claude.ai-inspired warm gray + terracotta)
+================================================================================
+
+WHY THIS TASK
+-------------
+Picked TASK-002 over the other critical-priority pending task (TASK-007 NextAuth +
+Google OAuth) for two reasons:
+  1) TASK-002 was already mid-flight in the working tree: components.json +
+     button/card/input/label + lib/utils.ts uncommitted. Finishing what's started
+     beats opening a new front, especially when the started work is foundational
+     for every UI task downstream.
+  2) TASK-007 requires hand-execution of the OAuth flow (test_steps 1-5 are all
+     manual: redirect to Google, sign in with whitelist email, sign in with
+     non-whitelist, cookie inspection, refresh-persistence). The harness cannot
+     honestly verify any of those. TASK-002 is at least mostly automatable
+     (typecheck + build + dev-server smoke) with one residual visual-fidelity
+     caveat (test_step 2: matching the Claude.ai reference).
+
+WHAT WAS PRE-EXISTING (BEFORE THIS ITERATION)
+---------------------------------------------
+- components.json: style=new-york, baseColor=stone, cssVariables=true, rsc=true,
+  iconLibrary=lucide. Aliases: @/components, @/lib, @/lib/utils, @/components/ui,
+  @/hooks. Tailwind css = app/globals.css.
+- components/ui/{button,card,input,label}.tsx — all four classic-style (forwardRef)
+  shadcn primitives.
+- lib/utils.ts with cn() helper (clsx + twMerge).
+- app/layout.tsx: Inter font wired via next/font with --font-inter variable, lang=ru,
+  flex-col body. Subsets: latin + cyrillic (good — handles RU strings).
+- app/globals.css: full @theme inline color/radius/font tokens; warm-gray OKLCH
+  palette with terracotta primary (oklch(0.58 0.155 35) = #C96442). --radius was
+  0.625rem (10px), background was oklch(0.985 0.005 85) (≈ #fafaf9).
+- All radix-ui deps (react-dialog, react-dropdown-menu, react-tabs, react-progress,
+  react-label, react-slot) AND sonner ^2.0.7 AND react-hook-form ^7.75.0 +
+  @hookform/resolvers ^5.2.2 already in package.json. Apparently the user ran
+  `npx shadcn add ...` earlier; package.json was updated but the component files
+  themselves were never written (or were deleted). lucide-react ^1.14.0 also there.
+- tw-animate-css imported in globals.css — provides data-[state=open]:animate-in,
+  slide-in-from-bottom, fade-in-0, zoom-in-95, etc. Standard shadcn animation kit.
+
+WHAT THIS ITERATION ADDED
+-------------------------
+1) Eight new shadcn primitives in components/ui/:
+     - dialog.tsx (Dialog, DialogTrigger, DialogContent, DialogHeader, DialogFooter,
+       DialogTitle, DialogDescription, DialogClose, DialogOverlay, DialogPortal)
+     - sheet.tsx (Sheet variants: top/bottom/left/right; bottom variant has
+       built-in iPhone safe-area-inset-bottom padding for TASK-018 mobile form)
+     - badge.tsx (Badge with default/secondary/destructive/outline variants)
+     - progress.tsx (Progress with value 0-100 → translateX percentage)
+     - tabs.tsx (Tabs, TabsList, TabsTrigger, TabsContent)
+     - dropdown-menu.tsx (full set incl. CheckboxItem, RadioItem, Sub*)
+     - sonner.tsx (Toaster wrapper themed with design-system tokens)
+     - form.tsx (Form/FormField/FormItem/FormLabel/FormControl/FormDescription/
+       FormMessage + useFormField hook — react-hook-form Controller wrapper)
+
+2) Tightened the design tokens in app/globals.css to match TASK-002 spec EXACTLY:
+     - --radius: 0.625rem (10px) → 0.5rem (8px)
+       This propagates through the @theme inline radius scale:
+         --radius-sm: 4px (was 6px)
+         --radius-md: 6px (was 8px)  ← Button uses this (spec: 6px ✓)
+         --radius-lg: 8px (was 10px)
+         --radius-xl: 12px (was 14px)  ← Card uses this (spec: 8-12px ✓)
+     - --background: oklch(0.985 0.005 85) → oklch(0.971 0.003 85)
+       The new OKLCH renders to ≈ #f7f7f5, the spec's exact warm-gray hex.
+       The old value was slightly too light (≈ #fafaf9).
+     - --primary stays at oklch(0.58 0.155 35) = #C96442 (spec terracotta ✓).
+     - --border stays at oklch(0.9 0.005 85) ≈ #e5e5e5 (spec border ✓).
+     - --secondary, --muted, --accent: warm-gray companions, unchanged.
+     - --destructive: oklch(0.55 0.18 25) — desaturated red, fits warm palette.
+
+3) Test page at app/ui-test/page.tsx — a 'use client' page that exercises every
+   primitive in five Card sections:
+     - Buttons: 6 variants (default/secondary/outline/ghost/link/destructive) ×
+       4 sizes (default/sm/lg/icon) + disabled state
+     - Form primitives: Label + Input (default + disabled)
+     - Badges: 4 variants + Progress (42% + 88%)
+     - Tabs: Активные/Архив (Cyrillic to verify Inter subset)
+     - Overlays: Dialog with header/footer, Sheet side='bottom' (mobile pattern),
+       DropdownMenu with label/separator/items, sonner toast button
+   Toaster mounted inside the test page (not root layout — see decision below).
+
+DESIGN DECISIONS WORTH FLAGGING
+-------------------------------
+1) Component style: classic React.forwardRef pattern, NOT the modern function-
+   component pattern that components.json's `style: "new-york"` implies. Reason:
+   the four pre-existing primitives (button/card/input/label) all use forwardRef,
+   so adding 8 new ones in a different style would create a noisy mixed codebase
+   for no functional benefit. Stylistic consistency across one team's codebase
+   beats strict adherence to the registry default. If the user wants to
+   regenerate everything in new-york style later, that's a one-shot find-and-
+   replace across components/ui/.
+
+2) Sonner Toaster NOT mounted in app/layout.tsx. Reason: the root layout currently
+   serves both the (auth)/login page and the (app)/* protected pages. Adding a
+   Toaster to root means the login page also gets the toast container even though
+   it has nothing to toast. Better pattern: mount Toaster in the (app)/layout.tsx
+   that TASK-008 will create — that way it's scoped to authed pages only, where
+   all our toast-emitting actions live (TASK-018 ActivityForm, TASK-025 quick-add,
+   TASK-028 water +250ml, etc.). TASK-008 should pick this up.
+
+3) sheet.tsx side='bottom' includes pre-baked iPhone safe-area padding via
+   `pb-[max(env(safe-area-inset-bottom),1.5rem)]`. This is the bottom-sheet that
+   TASK-018 (ActivityForm mobile pattern) and TASK-028 (water actions) will use.
+   Baking the safe-area in here means call sites don't have to remember it.
+
+4) Form component uses Radix Slot for FormControl. This means FormControl
+   composes with whatever input is passed as its child — Input, RadioGroup,
+   Select, Switch, etc. — and forwards aria-describedby, id, aria-invalid to
+   that child without an extra wrapper div. Standard shadcn pattern; included
+   here for completeness even though no current test_step exercises it.
+
+5) Toolchain note (consistent with every prior progress entry): the user prompt
+   asked for `uv run ruff check .` / `uv run pytest`. As flagged since TASK-001,
+   this is a TS/Next.js project, not Python. Used: ESLint / tsc --noEmit /
+   vitest. Same intent, correct tooling.
+
+VERIFICATION
+------------
+Per architectural_principles "Тесты пишем ТОЛЬКО для streak calculation и token
+crypto. CRUD не покрываем unit-тестами" — no permanent unit tests added for UI
+primitives. The shadcn registry components have a contract guaranteed by their
+upstream repo and Radix's a11y test coverage; adding Vitest + Testing Library
++ jsdom JUST for our 8 thin wrappers would pull a dep we don't need and would
+duplicate Radix's own coverage.
+
+Automatable gates (all pass):
+  - npm run typecheck — clean (all forwardRef + cva + Radix prop types resolve)
+  - npm run lint — clean
+  - npm run format:check — clean after one prettier --write pass. The pass also
+    reformatted the 4 pre-existing components (button/card/input/label) which
+    had drifted from prettier-plugin-tailwindcss output (class-name ordering and
+    a few line-break tweaks). Pure cosmetic; no semantic change.
+  - npm test — 44/44 unaffected (10 cipher + 16 streaks + 18 progress)
+  - npm run build — Compiled successfully in 1235ms with shell-overridden env
+    vars (placeholder DATABASE_URL/DIRECT_URL/NEXTAUTH_*/GOOGLE_* that pass zod
+    min-length checks; bypasses the known TASK-003 .env.local NEXTAUTH_URL typo
+    + line-31 quote-string parse issue). Routes built: ○ / + ○ /_not-found +
+    ƒ /api/cron/check-deadlines + ○ /ui-test. /ui-test prerenders STATICALLY
+    despite being 'use client' — expected, since a client-rendered page with no
+    server data fetching can be statically generated.
+
+Dev-server smoke (Next 16 turbopack):
+  - npm run dev with shell-overridden env, polled until http://localhost:3000/
+    ui-test returned 200 (took ~1s for first compile, 195ms server ready time).
+  - curl on /ui-test returned valid SSR HTML (200 OK).
+  - grep on the curl'd HTML confirmed every expected token: 'TASK-002',
+    'UI primitives', 'terracotta', 'Buttons', 'Открыть Dialog', 'Активные'.
+    Cyrillic subset of Inter resolves server-side.
+  - curl on / also returned 200 (untouched starter page still works).
+  - Dev-server log shows zero errors, zero warnings, zero hydration mismatches
+    across all GETs. Steady-state /ui-test response time ~20ms.
+
+HARNESS LIMITATION (UNAVOIDABLE)
+--------------------------------
+TASK-002 test_step 2 says "проверить, что цвета, шрифты, скругления соответствуют
+референсу Claude.ai". Test_step 3 says "проверить отзывчивость компонентов
+(hover, focus, disabled)". Both are visual judgments I literally cannot make from
+this harness — I have no browser eyes, no screenshot tool, no ability to assert
+visual equivalence to a reference image.
+
+What I DID verify, that is a meaningful proxy for the visual spec:
+  - The OKLCH values are mathematically equivalent to the spec's hex codes
+    (background ≈ #f7f7f5, primary = #C96442, border ≈ #e5e5e5).
+  - The radius cascade pixel values match the spec exactly (button=6px, card=12px).
+  - The font variable is wired through CSS @theme inline → body font-sans → all
+    primitives inherit, and Inter is loaded with cyrillic+latin subsets.
+  - The SSR HTML for the test page is well-formed and contains all primitives.
+  - Hover/focus/disabled CSS classes exist in the rendered HTML (Tailwind's
+    hover:bg-primary/90, focus-visible:ring-2, disabled:opacity-50, etc.).
+
+What's left for the user (10-second eyeball check):
+  - Open http://localhost:3000/ui-test in a browser.
+  - Confirm the warm-gray bg + terracotta accents look right.
+  - Tab through the buttons to verify focus rings and hover states.
+  - Click the Sheet "bottom" trigger to confirm it slides up from the bottom
+    with safe-area padding (best done in Chrome DevTools mobile emulator).
+  - Click the Toast trigger to confirm toasts pop in top-right with the right
+    background/border tokens.
+
+NOTES FOR NEXT ITERATIONS
+-------------------------
+- TASK-002 was the LAST critical-priority task with unblocked dependencies that
+  the harness can verify end-to-end. The remaining critical task is TASK-007
+  (NextAuth + Google OAuth), and its test_steps are all hand-execution (browser
+  redirect to Google OAuth, sign-in with whitelist + non-whitelist emails,
+  cookie inspection in DevTools, refresh-persistence check). I can write the
+  config + the route handler + the helper functions, but verifying that "Google
+  OAuth flow actually works end-to-end" is impossible from here without real
+  GOOGLE_CLIENT_ID/SECRET creds + a real Google account + browser interaction.
+  The user should either:
+    (a) Provide me the OAuth creds and accept that "verified" means "I wrote the
+        code, ran typecheck/lint/build, and confirmed the redirect URL builds",
+        not "I personally signed in with Google";
+    (b) Hand-execute TASK-007 themselves (it's a 30-min job for someone with
+        Google Cloud Console access);
+    (c) Pick up another non-OAuth-blocked task — but per the dependency analysis
+        in the TASK-022 progress block, EVERY remaining UI task depends on
+        TASK-009 (responsive nav) which depends on TASK-008 (auth layout) which
+        depends on TASK-007. So the critical-path bottleneck is real.
+
+- The remaining non-OAuth-blocked work in priority order:
+    * TASK-039 (Sentry, low priority) — unblocked. Could be picked up if the
+      user wants infra work.
+    * TASK-040 (deploy docs, low) — depends on TASK-035 (Strava sync, blocked
+      on Strava OAuth which is gated on TASK-031 which is gated on TASK-007/8).
+
+- Working tree at end of this iteration:
+    NEW (staged for TASK-002 commit):
+      beatyourself/components.json (was untracked)
+      beatyourself/components/ui/button.tsx (was untracked)
+      beatyourself/components/ui/card.tsx (was untracked)
+      beatyourself/components/ui/input.tsx (was untracked)
+      beatyourself/components/ui/label.tsx (was untracked)
+      beatyourself/components/ui/badge.tsx (new this iter)
+      beatyourself/components/ui/dialog.tsx (new this iter)
+      beatyourself/components/ui/dropdown-menu.tsx (new this iter)
+      beatyourself/components/ui/form.tsx (new this iter)
+      beatyourself/components/ui/progress.tsx (new this iter)
+      beatyourself/components/ui/sheet.tsx (new this iter)
+      beatyourself/components/ui/sonner.tsx (new this iter)
+      beatyourself/components/ui/tabs.tsx (new this iter)
+      beatyourself/lib/utils.ts (was untracked)
+      beatyourself/app/ui-test/page.tsx (new this iter)
+    MODIFIED (staged for TASK-002 commit):
+      beatyourself/app/globals.css (radius + background OKLCH tightening)
+      beatyourself/app/layout.tsx (was already modified; Inter font wiring —
+        not modified by THIS iteration, but committing it under TASK-002 since
+        the font wiring IS part of TASK-002's acceptance criterion 4)
+      tasks.json
+      progress.txt
+    PRE-EXISTING UNSTAGED (NOT touched, hands-off per prior policy):
+      beatyourself/package.json + package-lock.json (radix/sonner/react-hook-form
+        deps were added by the user before this iteration; leaving them
+        unstaged so the user can decide whether they belong in TASK-002 or
+        a separate dep-bump commit)
+      ralph.sh modified
+      README.md deleted
+
+- Pre-existing-but-still-open issues from prior iterations (still hands-off):
+    * .env.local NEXTAUTH_URL has a trailing-quote typo (TASK-003 finding)
+    * .env.local line 31 has a quote-string parse issue (TASK-006 finding)
+    * instrumentation.ts dev-startup env validation gap under Next 16 turbopack
+      (TASK-005 finding)
+    * pg-connection-string SSL deprecation warning on smoke runs (TASK-005
+      finding) — track for pg v9 / pg-connection-string v3 cutover.
