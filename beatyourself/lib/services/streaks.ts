@@ -1,4 +1,4 @@
-import { formatInTimeZone } from "date-fns-tz";
+import { formatUserTzDayKey, formatUtcDayKey, shiftDayKey } from "@/lib/utils/date-tz";
 
 export const DEFAULT_USER_TZ = "Europe/Moscow";
 
@@ -17,7 +17,7 @@ export function calculateStreak(
 
   const activeDays = new Set<string>();
   for (const a of activities) {
-    activeDays.add(toUtcDayKey(a.activityDate));
+    activeDays.add(formatUtcDayKey(a.activityDate));
   }
 
   const longest = computeLongestStreak(activeDays);
@@ -44,7 +44,7 @@ function computeLongestStreak(activeDays: ReadonlySet<string>): number {
 }
 
 function computeCurrentStreak(activeDays: ReadonlySet<string>, userTz: string, now: Date): number {
-  const todayKey = formatInTimeZone(now, userTz, "yyyy-MM-dd");
+  const todayKey = formatUserTzDayKey(now, userTz);
 
   let cursor: string;
   if (activeDays.has(todayKey)) {
@@ -61,15 +61,4 @@ function computeCurrentStreak(activeDays: ReadonlySet<string>, userTz: string, n
     cursor = shiftDayKey(cursor, -1);
   }
   return count;
-}
-
-function toUtcDayKey(d: Date): string {
-  return formatInTimeZone(d, "UTC", "yyyy-MM-dd");
-}
-
-function shiftDayKey(key: string, deltaDays: number): string {
-  const [y, m, d] = key.split("-").map(Number);
-  const date = new Date(Date.UTC(y, m - 1, d));
-  date.setUTCDate(date.getUTCDate() + deltaDays);
-  return toUtcDayKey(date);
 }

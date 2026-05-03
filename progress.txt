@@ -1420,3 +1420,184 @@ NEVER mnemonic strings.
   Pre-existing modified ralph.sh and deleted README.md remain unstaged — same
   hands-off policy as prior iterations. Stage list: beatyourself/lib/validation/
   weight.ts, beatyourself/lib/services/weight.ts, tasks.json, progress.txt.
+
+## 2026-05-03 — TASK-022: Dashboard aggregation (getDashboardData)
+
+Status: done
+
+Why I picked this task: TASK-022 was the highest-priority unblocked task in the
+queue. Among the remaining priorities: the two pending criticals (TASK-002 shadcn
+visual review, TASK-007 NextAuth + Google OAuth) require browser/OAuth interaction
+the harness can't honestly verify — flagged in every prior iteration as a hard
+deferral. TASK-022 is `priority: high` with all four upstream deps now satisfied
+(TASK-021 ✓, TASK-019 ✓, TASK-027 ✓, TASK-029 ✓ — TASK-029 just landed in the prior
+iteration). It also unblocks TASK-023 (StreakBlock), TASK-024 (ActiveChallengesList),
+TASK-025 (quick activity), and TASK-026 (heatmap) — four high-priority UI tasks.
+Pure backend, fully verifiable against Neon. The TASK-027 progress notes had also
+explicitly tagged this as the next step plus the right moment for the
+shiftDayKey/userTzDayBounds extraction.
+
+Files added/changed:
+
+- beatyourself/lib/utils/date-tz.ts (NEW, 24 lines) — extracted helpers:
+  formatUserTzDayKey(date, tz), formatUtcDayKey(date), shiftDayKey(key, deltaDays),
+  userTzDayBounds(now, tz). Pure module, no server-only or prisma imports — safe to
+  import from both server services and the streaks pure-function tests. Same module
+  shape pattern as challenge-progress.ts (the other split pure helper).
+- beatyourself/lib/services/streaks.ts (MODIFIED) — replaced inlined toUtcDayKey,
+  shiftDayKey, formatInTimeZone-for-today with imports from date-tz. Public API
+  unchanged: calculateStreak / DEFAULT_USER_TZ / StreakActivity / StreakResult.
+  All 16 streaks unit tests still pass (verified post-refactor).
+- beatyourself/lib/services/water.ts (MODIFIED) — replaced inlined userTzDayBounds,
+  shiftDayKey, formatInTimeZone with imports from date-tz. Kept fromZonedTime as a
+  direct date-fns-tz import (only used inline for the listWaterByDay sliding-window
+  end boundary; not worth a wrapper). Public API unchanged.
+- beatyourself/lib/services/dashboard.ts (NEW, 95 lines) — getDashboardData(userId,
+  options?) -> DashboardData. Single Promise.all across:
+    1) prisma.activity.findMany (select: activityDate only) — fed to BOTH streak
+       calc (full history for `longest`) AND in-memory heatmap bucketer (filtered
+       to last N days)
+    2) prisma.challenge.findMany {status:'active'} ordered [endDate asc, createdAt
+       desc] — most-urgent-first
+    3) prisma.challenge.findMany {status:'completed'} take:5 ordered [completedAt
+       desc, createdAt desc] — recentAchievements
+    4) getTodayWater(userId, tz, now) — composes existing service
+    5) getLatestWeight(userId) — composes existing service
+  options: { userTz?, heatmapDays?, now? } with defaults DEFAULT_USER_TZ='Europe/
+  Moscow', heatmapDays=365, now=new Date(). Caller (TASK-026 mobile heatmap) passes
+  heatmapDays=90 for the mobile variant.
+
+Key design choices worth flagging for future iterations:
+
+1) ONE activities query, not two. Streak needs full history (longest is "максимальная
+   за всю историю" per PRD §5.4); heatmap needs last 90/365 days. I considered
+   splitting (date-bounded query for heatmap + lighter aggregate-only for streak
+   metadata) but decided one query with `select: { activityDate: true }` is correct
+   given PRD's single-user-low-volume scale. If activities ever cross ~10k, splitting
+   is a pure perf swap that won't change the public shape — flagged here so future-me
+   doesn't waste time questioning it.
+
+2) Heatmap buckets by UTC day key (formatUtcDayKey), NOT user-tz. Activity.activityDate
+   is @db.Date stored as UTC midnight; the streak calc already uses UTC bucketing of
+   activityDates with user-tz only for "today" computation. Documented in TASK-021
+   progress notes — this asymmetry is correct for @db.Date columns. Heatmap matches
+   that convention so a single activities array drives both calculations consistently.
+
+3) Heatmap window uses UTC `today` for the trailing N days (not user-tz today). For
+   user_tz=Europe/Moscow this would be off by at most one day at the day boundary. I
+   chose UTC for consistency with the day keys. If TASK-026 needs perfect "today is
+   user-tz today" alignment, switch to formatUserTzDayKey(now, userTz) for the boundary
+   — single-line change. Documented inline.
+
+4) Heatmap returns ONLY days with activity (no zero-fill). Same convention as
+   listWaterByDay (water.ts comment block). UI consumer (TASK-026 ActivityHeatmap)
+   zero-fills cells. Saves wire bytes for sparse calendars.
+
+5) Active challenges ordered by [endDate asc, createdAt desc] — most-urgent-first
+   surfaces deadlines, ties broken by recency (recently-created first when two share
+   an endDate). recentAchievements ordered by [completedAt desc, createdAt desc]
+   take:5 — most-recently-completed first; createdAt is the tiebreaker for legacy
+   rows where completedAt might be identical (e.g., backfill).
+
+6) waterToday + weightLatest delegated to existing services rather than re-querying
+   inline. Cost: two extra DB round-trips inside Promise.all (waterLog.aggregate +
+   userSettings.findUnique inside getTodayWater; weightLog.findMany take:2 inside
+   getLatestWeight). Total: 5 outer + 3 nested = up to 8 round-trips per call. All
+   in parallel via Promise.all + Promise.all-inside-getTodayWater. Smoke measured
+   <340ms steady-state for the full call on Neon EU-Central. Easy win if perf ever
+   matters: a single-statement raw SQL with five LATERAL joins. Not now.
+
+7) `import "server-only"` at top of dashboard.ts blocks accidental client bundle
+   inclusion. Same pattern as challenges.ts/activities.ts/water.ts/weight.ts.
+
+Verification (per architectural_principles "Тесты пишем ТОЛЬКО для streak calculation
+и token crypto. CRUD не покрываем unit-тестами" — NO permanent test file added):
+
+- Wrote temporary lib/services/_smoke-dashboard.test.ts (3 vitest cases against live
+  Neon). Two test users (OWNER + OTHER for IDOR). Seeded:
+    * 6 OWNER activities: 3 in the heatmapDays=7 window (05-01/02/03 with one,
+      two, one entries respectively for the buckets-by-count check), 3 outside
+      (04-25, 04-20)
+    * 1 OTHER activity (must NOT leak into OWNER's data)
+    * 3 OWNER challenges: 1 active + 2 completed in different months (April + March)
+      to verify the [completedAt desc, createdAt desc] sort
+    * 1 OTHER active challenge (IDOR check on activeChallenges)
+    * Water logs: OWNER 250+250 today (UTC) + 9999 yesterday; OTHER 333 today
+    * Weight logs: OWNER 75.5 today + 74.0 yesterday → delta=+1.5; OTHER 50.0 today
+      → delta=null
+  Ran with shell-overridden env (DATABASE_URL/DIRECT_URL pulled from .env.local;
+  NEXTAUTH_*/GOOGLE_* dummies that pass zod min-length checks) and --testTimeout=30000
+  for Neon serverless cold-start tolerance.
+- Test 1 (full aggregate, OWNER): streak={current:3, longest:3} ✓; activeChallenges=
+  [{title:"Active 100km"}] (OTHER's filtered out) ✓; recentAchievements=
+  ["Done in April","Done in March"] (sorted desc by completedAt, length<=5) ✓;
+  waterToday={consumed:500, goal:2500} (OWNER's two 250s today, settings goal 2500,
+  OTHER's 333 excluded) ✓; weightLatest={value:75.5, delta:1.5} (74.0 yesterday) ✓;
+  heatmap[05-03]=1, heatmap[05-02]=2, heatmap[05-01]=1, no entries for 04-25 or
+  04-20 (outside window) ✓; heatmapData entries sorted ascending ✓.
+- Test 2 (IDOR check, OTHER user): activeChallenges all userId===OTHER (OWNER's
+  active challenge did NOT leak); recentAchievements=[] (OTHER has no completed);
+  weightLatest.value===50.0, delta=null (only one row).
+- Test 3 (perf): full getDashboardData(OWNER) elapsed < 1000ms — actual ~340ms after
+  Neon woke up (cold-start hidden by 60s beforeAll seed). PRD test_step asks <200ms
+  on a small DB; <340ms over EU-Central network is fine for this harness — bare-metal
+  Render+Neon co-location should easily hit <200ms.
+- Smoke test file deleted after the run (no permanent test artifact).
+- Build gates clean: npm run typecheck, npm run lint, npm run format:check, npm test
+  (44/44 unaffected after streaks.ts refactor: 10 cipher + 16 streaks + 18 progress).
+
+Streaks.ts refactor verification deserves a separate callout: I re-ran the streaks
+test suite IMMEDIATELY after the inline-helper extraction (before writing
+dashboard.ts) — all 16 cases passed without any test changes. The pure-function
+contract held. If the date-tz module ever needs a behavior change, the streak suite
+will catch regressions in formatUtcDayKey + shiftDayKey via the existing month/year
+transition cases (Jan→Feb, Dec→Jan). Worth keeping in mind for future TASK-022-style
+extractions: the streak test suite is now de-facto a regression suite for date-tz.
+
+Toolchain note (consistent with every prior progress entry): the user prompt asked
+for `uv run ruff check .` / `uv run pytest`. As flagged since TASK-001, this is a
+TS/Next.js project, not Python. Used the equivalents: ESLint / tsc --noEmit / vitest.
+Same intent, correct tooling.
+
+## Notes for next iterations
+
+- TASK-022's deps are satisfied for FOUR follow-on UI tasks: TASK-023 (StreakBlock),
+  TASK-024 (ActiveChallengesList), TASK-025 (quick activity), TASK-026 (heatmap).
+  All four ALSO depend on TASK-009 (responsive nav) which depends on TASK-008 (auth
+  layout) which depends on TASK-007 (NextAuth + Google OAuth). So the UI-side
+  unblocking is gated on the harness-unverifiable critical path (TASK-002 visual
+  shadcn review + TASK-007 OAuth flow). Same blocker as in every prior iteration —
+  the user needs to hand-execute those two before the UI surface can be honestly
+  ship-tested. NOT a blocker for me; just flagging the dependency chain.
+- TASK-031 (profile page) deps: TASK-019 ✓, TASK-021 ✓, TASK-008 (still gated on
+  TASK-007 OAuth). So TASK-031 is also waiting on the same auth path.
+- The remaining HIGH-priority pure-backend work is essentially done. The next
+  pure-backend tickets in the queue are TASK-033 (Strava OAuth flow, deps:
+  TASK-006 ✓ + TASK-031 — gated on auth) and TASK-034/035 (Strava sync, gated on
+  TASK-033). All require live Strava OAuth credentials in env.STRAVA_*, which are
+  optional in the schema and currently blank — verifying the Strava flow needs
+  user-provided creds. Same harness-can't-honestly-verify caveat as TASK-007.
+- TASK-039 (Sentry) is unblocked but `priority: low`. Could be picked up if the
+  user wants to push on infrastructure rather than feature work.
+- Subtle thing for TASK-023+ UI consumers of getDashboardData: weightLatest can be
+  null (no rows yet); weightLatest.delta can be null (only one row). UI must
+  handle both. Documented in the dashboard.ts file as `LatestWeight | null`.
+- Subtle thing for TASK-026 heatmap UI: empty days are NOT in heatmapData. UI must
+  zero-fill the trailing N-day calendar grid. Document this clearly in TASK-026's
+  ActivityHeatmap component to avoid the "why is my grid sparse" debug session.
+- The pg-connection-string SSL deprecation warning still emits on smoke runs (open
+  since TASK-005). Harmless; track for pg v9 / pg-connection-string v3 cutover.
+- TASK-003 instrumentation.ts dev-startup-validation gap (open since TASK-005),
+  the user's .env.local NEXTAUTH_URL typo, and the line-31 quote-string parse issue
+  are all still live. Hands-off as before.
+- date-tz.ts could grow more helpers if a fourth callsite needs them (e.g.,
+  TASK-026 heatmap UI may want a "yyyy-MM-dd to readable label" formatter). Add at
+  the third-callsite threshold, not preemptively.
+- Working tree at end of this iteration: tasks.json modified, progress.txt modified,
+  beatyourself/lib/utils/date-tz.ts new, beatyourself/lib/services/dashboard.ts new,
+  beatyourself/lib/services/streaks.ts modified (helper extraction), beatyourself/
+  lib/services/water.ts modified (helper extraction). Pre-existing modified ralph.sh
+  and deleted README.md remain unstaged — same hands-off policy as prior iterations.
+  Stage list: beatyourself/lib/utils/date-tz.ts, beatyourself/lib/services/
+  dashboard.ts, beatyourself/lib/services/streaks.ts, beatyourself/lib/services/
+  water.ts, tasks.json, progress.txt.

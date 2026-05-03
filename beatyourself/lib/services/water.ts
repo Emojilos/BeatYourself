@@ -1,10 +1,11 @@
 import "server-only";
 
 import type { WaterLog } from "@prisma/client";
-import { formatInTimeZone, fromZonedTime } from "date-fns-tz";
 
 import { prisma } from "@/lib/db/prisma";
 import { DEFAULT_USER_TZ } from "@/lib/services/streaks";
+import { formatUserTzDayKey, shiftDayKey, userTzDayBounds } from "@/lib/utils/date-tz";
+import { fromZonedTime } from "date-fns-tz";
 
 const DEFAULT_WATER_GOAL_ML = 2000;
 
@@ -56,7 +57,7 @@ export async function listWaterByDay(
 ): Promise<WaterByDay[]> {
   if (days <= 0) return [];
 
-  const todayKey = formatInTimeZone(now, tz, "yyyy-MM-dd");
+  const todayKey = formatUserTzDayKey(now, tz);
   const earliestKey = shiftDayKey(todayKey, -(days - 1));
   const start = fromZonedTime(`${earliestKey}T00:00:00.000`, tz);
   const end = fromZonedTime(`${shiftDayKey(todayKey, 1)}T00:00:00.000`, tz);
@@ -68,7 +69,7 @@ export async function listWaterByDay(
 
   const totals = new Map<string, number>();
   for (const log of logs) {
-    const key = formatInTimeZone(log.loggedAt, tz, "yyyy-MM-dd");
+    const key = formatUserTzDayKey(log.loggedAt, tz);
     totals.set(key, (totals.get(key) ?? 0) + log.amountMl);
   }
 
@@ -81,20 +82,4 @@ export async function deleteWater(userId: string, id: string): Promise<WaterLog 
   const existing = await prisma.waterLog.findFirst({ where: { id, userId } });
   if (!existing) return null;
   return prisma.waterLog.delete({ where: { id } });
-}
-
-function userTzDayBounds(now: Date, tz: string): { start: Date; end: Date } {
-  const todayKey = formatInTimeZone(now, tz, "yyyy-MM-dd");
-  const tomorrowKey = shiftDayKey(todayKey, 1);
-  return {
-    start: fromZonedTime(`${todayKey}T00:00:00.000`, tz),
-    end: fromZonedTime(`${tomorrowKey}T00:00:00.000`, tz),
-  };
-}
-
-function shiftDayKey(key: string, deltaDays: number): string {
-  const [y, m, d] = key.split("-").map(Number);
-  const date = new Date(Date.UTC(y, m - 1, d));
-  date.setUTCDate(date.getUTCDate() + deltaDays);
-  return formatInTimeZone(date, "UTC", "yyyy-MM-dd");
 }
