@@ -1847,3 +1847,212 @@ NOTES FOR NEXT ITERATIONS
       (TASK-005 finding)
     * pg-connection-string SSL deprecation warning on smoke runs (TASK-005
       finding) — track for pg v9 / pg-connection-string v3 cutover.
+
+
+================================================================================
+TASK-007 — NextAuth v5 + Google OAuth + email whitelist + auto User/UserSettings
+Date: 2026-05-03
+================================================================================
+
+WHY THIS TASK
+-------------
+TASK-007 was the only remaining critical-priority pending task and the
+critical-path bottleneck: every UI task depends transitively on TASK-008
+(protected layout) which depends on TASK-007. Without OAuth, the rest of
+the app cannot be wired up. TASK-002's "notes for next iteration" called
+this out explicitly. Picked despite the harness limitation flagged below.
+
+WHAT WAS DONE
+-------------
+Installed next-auth@5.0.0-beta.31 (Auth.js v5; supports Next 16 per
+peerDeps: next ^14.0.0-0 || ^15.0.0 || ^16.0.0). Added 7 packages, no
+peer-dep warnings beyond the optional @simplewebauthn/* and nodemailer
+that we don't use.
+
+Files added (4):
+
+  beatyourself/lib/auth/config.ts
+    - exports `handlers`, `auth`, `signIn`, `signOut` from NextAuth({...})
+    - strategy=jwt, maxAge=30d, trustHost=true (Render proxy header)
+    - Google provider with prompt=consent + access_type=offline +
+      response_type=code (forces refresh_token reissue per the
+      @auth/core/providers/google docs)
+    - pages.signIn='/login' so unauthenticated redirects from auth() and
+      requireSession() land at the page TASK-008 will create
+    - signIn callback (fail closed):
+        1. reject if account.provider !== 'google'
+        2. reject if !profile.email_verified
+        3. reject if no email or no profile.sub
+        4. if env.ALLOWED_EMAIL set, require case-insensitive equality
+        5. prisma.user.upsert keyed on the compound unique
+           (provider, providerId) — Prisma 7's relation key name is
+           `provider_providerId`. create branch passes
+           settings:{create:{}} so UserSettings materializes with schema
+           defaults (waterDailyGoalMl=2000, theme=light, etc).
+        6. update branch refreshes name/email/avatarUrl from Google so
+           profile changes propagate on each sign-in
+    - jwt callback: on initial sign-in, looks up the user.id from DB by
+      (provider,providerId) and stashes it in token.userId. This is the
+      durable internal UUID we use everywhere for IDOR scoping.
+    - session callback: copies token.userId → session.user.id
+
+  beatyourself/lib/auth/types.d.ts
+    - module-augments next-auth's Session.user to include `id: string`
+      (DefaultSession.user has only name/email/image)
+    - module-augments next-auth/jwt's JWT to include `userId?: string`
+    - tsconfig include picks it up automatically
+
+  beatyourself/lib/auth/session.ts
+    - import 'server-only' at top
+    - getSession() — thin wrapper around auth(), returns Session|null
+    - requireSession() — calls auth(), redirects('/login') via
+      next/navigation if no session.user.id. Returns Session typed with
+      session.user.id non-nullable (guaranteed by the redirect).
+
+  beatyourself/app/api/auth/[...nextauth]/route.ts
+    - `export const { GET, POST } = handlers;` — canonical Auth.js v5
+      catch-all shape.
+
+DESIGN DECISIONS WORTH FLAGGING
+-------------------------------
+1) JWT strategy not database strategy. Spec says "сессия хранится в JWT
+   (для простоты на free tier)" — also avoids needing the Auth.js
+   accounts/sessions tables. JWT signed with NEXTAUTH_SECRET; lives in
+   a httpOnly cookie. 30-day rolling window per spec.
+
+2) ALLOWED_EMAIL is OPTIONAL in the zod schema (TASK-003), so when it's
+   unset the signIn callback allows any verified Google email. Only
+   when ALLOWED_EMAIL is configured does the whitelist actually engage.
+   This means PRD test_step 3 ("Войти с НЕ-whitelist-email — отказ")
+   only exercises if the user sets ALLOWED_EMAIL in .env.local.
+
+3) `provider: "google"` literal vs Prisma const-enum import. Prisma 7
+   generates AuthProvider as an `as const` runtime object, but TypeScript
+   accepts the lowercase string literal because schema.prisma declares
+   AuthProvider with lowercase variants (AuthProvider.google === "google"
+   at runtime). Using the literal keeps config.ts free of an extra
+   import; consistency with how the rest of the codebase uses ChallengeStatus.active etc.
+
+4) signIn callback uses `profile.email_verified` to defend against
+   unverified Google accounts. The Google docs explicitly recommend this
+   pattern. For a whitelist-of-one auth model, even one unverified login
+   is too many.
+
+5) Module-augmentation in lib/auth/types.d.ts (.d.ts not .ts) so it's
+   declaration-only and not bundled. Sets up the typed `session.user.id`
+   consumed by every server action and page in TASK-008+.
+
+6) Used `import 'server-only'` in config.ts, session.ts. This blocks
+   accidental client-component imports — the session.ts bundle pulls in
+   prisma transitively, so even an accidental "import { getSession } from
+   '@/lib/auth/session'" in a client file will fail at build time.
+
+7) Did NOT install @auth/prisma-adapter. The PRD says "через Prisma
+   adapter ИЛИ ручная upsert в signIn" — the manual-upsert path is
+   simpler (no extra dep, JWT strategy doesn't need adapter session
+   tables, and we want explicit control over UserSettings creation).
+   This means the adapter's accounts/sessions Prisma models are NOT in
+   the schema and don't need to be — JWT-only mode works without them.
+
+8) NEXTAUTH_URL=http://localhost:3000 in .env.local. Auth.js v5 will
+   resolve the OAuth callback URL to
+   http://localhost:3000/api/auth/callback/google, which the user must
+   register in Google Cloud Console (and add the production callback
+   when deploying). No code change needed — this is a Cloud Console
+   config the user owns.
+
+9) Auth.js v5 also auto-recognizes AUTH_SECRET / AUTH_URL aliases, but
+   since TASK-003's zod schema standardized on the NEXTAUTH_* names, I
+   pass env.NEXTAUTH_SECRET explicitly to NextAuth({secret}) so no
+   implicit env-var-name reliance creeps in. Behavior is identical;
+   reading is more obvious.
+
+VERIFICATION
+------------
+Per architectural_principles "Тесты пишем ТОЛЬКО для streak calculation
+и token crypto. CRUD не покрываем unit-тестами" — no permanent unit
+tests added for auth.
+
+Automatable gates (all pass):
+  - npm run typecheck — clean (declaration-merging on Session.user.id
+    resolves; profile typed as GoogleProfile from @auth/core)
+  - npm run lint — clean
+  - npm run format:check — clean (prettier happy without --write)
+  - npm test — 44/44 unaffected (10 cipher + 16 streaks + 18 progress)
+  - npm run build — ✓ Compiled in 1846ms (with shell-overridden env).
+    New dynamic route ƒ /api/auth/[...nextauth] registered alongside
+    ƒ /api/cron/check-deadlines + ○ / + ○ /_not-found + ○ /ui-test.
+
+One-off live-DB smoke (deleted after run):
+  - File: lib/auth/_smoke-upsert.test.ts (1 vitest case)
+  - Confirmed: prisma.user.upsert with
+    where:{provider_providerId:{provider:'google',providerId:X}}
+    works in both create and update branches — same row.id returned,
+    second call updates name+avatarUrl in place. settings:{create:{}}
+    creates a UserSettings row with schema defaults (verified
+    waterDailyGoalMl=2000, theme='light'). Cleanup via
+    prisma.user.delete cascades to settings via onDelete:Cascade.
+  - Ran with shell-overridden env vars (DATABASE_URL/DIRECT_URL/
+    NEXTAUTH_*/GOOGLE_*) to bypass .env.local NEXTAUTH_URL trailing-
+    quote typo (TASK-003 finding, still pending).
+
+HARNESS LIMITATION (UNAVOIDABLE)
+--------------------------------
+TASK-007 PRD test_steps that require a real browser + real Google
+Cloud Console OAuth app + a real Google account:
+  1) Open /api/auth/signin → redirect to Google OAuth
+  2) Sign in with whitelist email → success, User+UserSettings created
+  3) Sign in with non-whitelist email → access denied, return to /login
+  4) Inspect cookie: httpOnly, secure (in prod), sameSite=lax
+  5) Reload browser — session persists
+
+I CANNOT execute these from this harness. The placeholder GOOGLE_CLIENT_*
+in .env.local appear real-looking but the redirect URI must be registered
+in the user's Google Cloud project for the flow to actually work.
+
+What I DID verify is a meaningful proxy:
+  - Config compiles and types correctly through Auth.js v5's full type
+    surface (Session, JWT, GoogleProfile, signIn callback param shapes)
+  - Route handler builds and registers as a dynamic route
+  - prisma.user.upsert path works against the real DB with a synthetic
+    profile.sub (compound-unique-key syntax verified at runtime)
+  - Module-augmentation flows: session.user.id is typed `string` after
+    requireSession() returns
+
+What's left for the user (10-min hand-execution):
+  - Google Cloud Console: create OAuth 2.0 Client ID, add redirect URIs:
+      http://localhost:3000/api/auth/callback/google
+      https://<production-domain>/api/auth/callback/google
+  - Copy the client_id/client_secret into .env.local (already there per
+    inspection — but verify they belong to the correct Cloud project)
+  - Set ALLOWED_EMAIL in .env.local to the whitelisted email
+  - Fix the .env.local NEXTAUTH_URL trailing-quote typo (TASK-003 finding)
+    so npm run dev can actually load env without shell overrides
+  - npm run dev → open http://localhost:3000/api/auth/signin → walk
+    through the four PRD test_steps
+
+NOTES FOR NEXT ITERATIONS
+-------------------------
+- TASK-008 (next critical-path task) is now unblocked. Use
+  `import { requireSession } from '@/lib/auth/session'` in
+  app/(app)/layout.tsx — session.user.id is non-null guaranteed.
+- Mount the sonner Toaster from components/ui/sonner.tsx inside the
+  (app) layout (not root layout) — the /login page should stay minimal.
+  TASK-002's progress note flagged this.
+- TASK-009 (responsive nav) and everything below depend on TASK-008.
+  The critical-path is now: TASK-008 → TASK-009 → all UI tasks.
+
+- Working tree at end of this iteration:
+    NEW (staged for TASK-007 commit):
+      beatyourself/lib/auth/config.ts
+      beatyourself/lib/auth/session.ts
+      beatyourself/lib/auth/types.d.ts
+      beatyourself/app/api/auth/[...nextauth]/route.ts
+    MODIFIED (staged for TASK-007 commit):
+      beatyourself/package.json (next-auth dep added)
+      beatyourself/package-lock.json
+      tasks.json (TASK-007 status: pending → done + notes)
+      progress.txt (this block)
+    PRE-EXISTING UNSTAGED (NOT touched, hands-off per prior policy):
+      ralph.sh modified
+      README.md deleted at repo root
