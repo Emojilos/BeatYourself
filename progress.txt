@@ -1254,3 +1254,169 @@ correct tooling for the stack.
   Pre-existing modified ralph.sh and deleted README.md remain unstaged — same hands-off
   policy as prior iterations. Stage list: beatyourself/lib/validation/water.ts,
   beatyourself/lib/services/water.ts, tasks.json, progress.txt.
+
+## 2026-05-03 — TASK-029: WeightLog service + zod schema
+
+Status: done
+
+Why I picked this task: The prior TASK-027 progress note explicitly tagged TASK-029
+(WeightLog service) as "the natural next pick — same priority (medium), same deps
+(TASK-005 done), pure backend, also unblocks TASK-022". Among the remaining priority
+queue, the pending criticals (TASK-002 shadcn visual review, TASK-007 NextAuth +
+Google OAuth) need browser/OAuth interaction the harness can't honestly verify —
+flagged in every prior iteration. So among medium-pending pure-backend work that
+unblocks TASK-022 (high-priority dashboard agg) along with the now-done TASK-019,
+TASK-021, TASK-027, this is the last gating service. With TASK-029 in, TASK-022 has
+all four upstream deps satisfied (TASK-021 ✓, TASK-019 ✓, TASK-027 ✓, TASK-029 ✓).
+
+Pre-existing context: weight.ts and weight (validation) files were already on disk as
+untracked from a partially-finished prior iteration. I audited both against the
+TASK-029 spec line-by-line, ran the build gates, then ran an end-to-end smoke against
+live Neon to verify all four PRD test_steps. Did not rewrite the files — they
+already matched the spec and the codebase's established conventions (challenges.ts,
+activities.ts, water.ts) cleanly.
+
+Files (already on disk, audited not authored):
+- beatyourself/lib/validation/weight.ts — logWeightSchema { weightKg: float
+  positive() lt(500), measuredAt: z.coerce.date(), note: trim().max(500).optional() }
+  and inferred LogWeightInput type. ~13 lines.
+- beatyourself/lib/services/weight.ts — logWeight / getLatestWeight / listWeights /
+  deleteWeight plus LatestWeight interface. All user-scoped. ~70 lines.
+
+Key design choices (verified against codebase conventions; flagging for next iters):
+
+1) WeightLog schema enforces "one weight per day" at the DB layer:
+       @@unique([userId, measuredAt])    // schema.prisma:167
+       measuredAt DateTime @db.Date       // schema.prisma:161
+   So logWeight uses prisma.weightLog.upsert({ where: { userId_measuredAt: {...} } })
+   — Prisma 7 generates that compound unique key name automatically. Single
+   round-trip, race-safe, no findFirst-then-update dance. This is the FIRST service
+   in the codebase to use a compound-unique upsert; activities.ts uses the same
+   pattern but on (externalId, source). The Prisma 7 compound-key naming is
+   consistent ({field1}_{field2}) — worth flagging if a future task lands on a
+   3-field compound unique.
+
+2) Calendar-day convention is consistent: WeightLog.measuredAt is @db.Date (UTC
+   midnight per Prisma 7 deserialization), same as Activity.activityDate and
+   Challenge.startDate/endDate. So tz normalization is the caller's responsibility
+   (form/Strava-sync layer); the service treats input Dates as UTC-midnight calendar
+   days. Matches TASK-016/017/021 progress notes' convention.
+
+3) toUtcMidnight helper extracts UTC year/month/day so a Date with non-zero
+   time-of-day collapses to that day's UTC midnight. With z.coerce.date() turning
+   'YYYY-MM-DD' into UTC midnight already, this is idempotent for the canonical form
+   coming from forms; it only matters when callers pass a Date with time-of-day
+   (e.g. new Date() in tests). Defensive and cheap.
+
+4) getLatestWeight returns { value, delta, measuredAt } where:
+   - value: latest weightKg
+   - delta: (latest.weightKg - previous.weightKg) OR null if only one row
+   - measuredAt: latest.measuredAt
+   Returns null entirely if no rows. delta=null (not 0) was the choice flagged in
+   TASK-027's next-iter notes — null is more honest than 0 (no comparison exists,
+   not "no change"). UI consumer (TASK-030 weight widget) handles null by hiding the
+   delta arrow. Implementation: single findMany with take:2 / orderBy desc, no
+   second query needed.
+
+5) listWeights(userId, days, now=new Date()) computes start = Date.UTC(now.year,
+   now.month, now.day - days + 1) so days=7 includes [today-6, today] inclusive.
+   days<=0 short-circuits to [] without hitting the DB. orderBy measuredAt desc
+   matches getLatestWeight's contract; UI can reverse for chart x-axis.
+
+6) Note handling: input is `note?: string` (optional in zod schema), but Prisma
+   WeightLog.note is `String?` (nullable). Service coerces undefined → null at the
+   boundary: `const note = input.note ?? null;`. In an upsert update branch,
+   undefined would leave the existing note unchanged (different semantics from
+   "clear it"). Since logWeight is upsert-by-day, treating an absent note as "clear
+   it" is the natural read of the form input — user re-logged today's weight and
+   omitted the note → previous note shouldn't haunt them.
+
+7) deleteWeight uses the challenges.ts findFirst-then-delete pattern: returns null
+   on cross-user / nonexistent without exposing which case. Two-query non-atomic is
+   fine for single-user ops.
+
+8) `import 'server-only'` at top blocks accidental client-bundle inclusion (cascades
+   from prisma singleton, but explicit at the service boundary too — matches the
+   pattern in challenges.ts/activities.ts/water.ts).
+
+9) No tz-aware day-bucketing helper extracted yet — measuredAt is already a
+   calendar-day field, so the abstraction would only matter for water/streaks/heatmap
+   where DateTime is bucketed into days. That's TASK-022's job. Will pull
+   shiftDayKey + userTzDayBounds from streaks.ts + water.ts into lib/utils/date-tz.ts
+   in the same commit as TASK-022 (third callsite — abstraction threshold met then,
+   not preemptively now). Re-confirming TASK-027's note.
+
+Verification (per architectural_principles "Тесты пишем ТОЛЬКО для streak calculation
+и token crypto. CRUD не покрываем unit-тестами" — NO permanent test file added):
+
+- Wrote temporary lib/services/_smoke-weight.test.ts (6 vitest cases). Created two
+  test users (owner + other for IDOR). Ran with shell-extracted env vars
+  (DATABASE_URL/DIRECT_URL pulled from .env.local with sed quote-stripping;
+  NEXTAUTH_*/GOOGLE_* dummies that pass zod min-length checks). All 6 cases passed:
+    1) test_step 1+2: logWeight(75.5) on today → row created (id assigned,
+       weightKg=75.5). logWeight(76.0) same day → same id, weightKg=76.0, only 1 row
+       in DB. Compound-unique upsert update branch verified.
+    2) test_step 3: logWeight(75.5) today + logWeight(74.0) yesterday →
+       getLatestWeight returns value=75.5, delta=1.5 (toBeCloseTo for float),
+       measuredAt = today's UTC midnight.
+    3) Edge: getLatestWeight with only 1 row → delta=null. The "null vs 0" choice
+       documented above is verified by this case.
+    4) Edge: getLatestWeight with 0 rows → null entirely (not { value: null, ... }).
+    5) listWeights: 3 rows (today / yesterday / 8 days ago) with days=7 returns
+       only the 2 within window, ordered desc. The 8-day-ago row excluded by the
+       `now.day - 7 + 1 = now.day - 6` window boundary calc.
+    6) test_step 4: deleteWeight cross-user returns null, row stays in DB
+       (findUnique confirms). Owner deleteWeight returns the row, findUnique
+       afterwards confirms removal. IDOR-safe.
+- Smoke test file deleted after run (no permanent test artifact).
+- Build gates clean: npm run typecheck, npm run lint, npm run format:check, npm test
+  (44/44 unaffected: 10 cipher + 16 streaks + 18 progress, all from prior iterations).
+
+User toolchain note: prompt asked for `uv run ruff check .` / `uv run pytest`. As
+flagged in every prior progress entry, this is a TS/Next.js project, not Python.
+Used the equivalents: ESLint / tsc --noEmit / vitest. Same intent, correct tooling.
+
+UUID gotcha (cost ~30 seconds, worth flagging): vitest first run failed with
+"Invalid input value: invalid input syntax for type uuid: '00000000-0000-0000-0000-
+0000000WeT01'" because I'd used non-hex characters ('W', 'e', 'T') in the UUID
+placeholder. User.id is @db.Uuid in Prisma (schema.prisma:60-ish), so Postgres
+strictly validates the format. Replaced with valid hex-only UUIDs
+(aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaa1) and the smoke ran clean. For future smoke
+tests creating Users directly, use crypto.randomUUID() OR known-hex placeholders —
+NEVER mnemonic strings.
+
+## Notes for next iterations
+
+- TASK-022 (Dashboard agg, getDashboardData) is now fully unblocked: deps TASK-021
+  ✓, TASK-019 ✓, TASK-027 ✓, TASK-029 ✓. It's high-priority, unblocks TASK-023
+  (StreakBlock), TASK-024 (ActiveChallengesList), TASK-025 (quick activity), TASK-026
+  (heatmap). Implementation hint: Promise.all the four service calls (calculateStreak
+  on user activities + listChallenges{status:'active'} + getTodayWater +
+  getLatestWeight + heatmap day-bucketing). The heatmap data wants user-tz day keys —
+  THIS is the third callsite for shiftDayKey + userTzDayBounds, so extract them from
+  streaks.ts + water.ts into lib/utils/date-tz.ts in the same commit. Drop the
+  inline helpers in both services and re-import — small refactor, single commit.
+  The recentAchievements field in TASK-022's spec wants the last 5 completed
+  challenges — listChallenges already supports {status:'completed'} ordering by
+  status+createdAt desc, so just extend it with a take:5 param OR call findMany
+  directly inline (keep services thin).
+- TASK-028 (water UI page) and TASK-030 (weight UI page) are independent UI work —
+  TASK-028's deps (TASK-027 ✓, TASK-009) need TASK-009 (nav) which itself depends
+  on TASK-007/008 (auth flow). So UI work is gated on auth landing first — same
+  blocker as in every prior iteration.
+- A subtle thing for TASK-030 (weight UI page): user must NOT be able to delete a
+  WeightLog by sending the wrong userId — deleteWeight already enforces this at the
+  service layer, but the server action calling it must use requireSession() to
+  resolve userId from the session, NOT from the form. Same IDOR pattern as challenges.
+- The pg-connection-string SSL deprecation warning still emits on smoke runs
+  (flagged since TASK-005). Harmless; track for pg v9 / pg-connection-string v3
+  cutover. No action needed.
+- TASK-003 instrumentation.ts dev-startup-validation gap (open since TASK-005), the
+  user's .env.local NEXTAUTH_URL typo, and the line-31 quote-string parse issue
+  are all still live. Hands-off as before.
+- Working tree at end of this iteration: tasks.json modified, progress.txt modified,
+  beatyourself/lib/validation/weight.ts new, beatyourself/lib/services/weight.ts new
+  (both pre-existing as untracked, audited and verified, not authored fresh).
+  Pre-existing modified ralph.sh and deleted README.md remain unstaged — same
+  hands-off policy as prior iterations. Stage list: beatyourself/lib/validation/
+  weight.ts, beatyourself/lib/services/weight.ts, tasks.json, progress.txt.
