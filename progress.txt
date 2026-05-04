@@ -2056,3 +2056,200 @@ NOTES FOR NEXT ITERATIONS
     PRE-EXISTING UNSTAGED (NOT touched, hands-off per prior policy):
       ralph.sh modified
       README.md deleted at repo root
+
+
+================================================================
+2026-05-04 — TASK-008 (DONE) — Protected (app) layout group
+================================================================
+
+WHAT THIS TASK REQUIRED
+-----------------------
+TASK-008 acceptance criteria (all four met by existing untracked
+files in the working tree at iteration start; this iteration was
+verification + commit, no code changes):
+
+  1) app/(app)/layout.tsx checks session via auth(), redirects to
+     /login if absent
+  2) app/(auth)/login/page.tsx with "Войти через Google" button
+  3) lib/auth/session.ts exports getSession() + requireSession()
+     (already done in TASK-007 — criterion 3 needed no new code)
+  4) All future pages inside app/(app)/* are auto-protected
+
+STATE AT ITERATION START
+------------------------
+git status showed three untracked files:
+  beatyourself/app/(app)/dashboard/page.tsx
+  beatyourself/app/(app)/layout.tsx
+  beatyourself/app/(auth)/login/page.tsx
+
+These were apparently created by a prior partial iteration but
+never committed. On read, they fully satisfied TASK-008's acceptance
+criteria — so the right call was to verify + commit, not rewrite.
+
+FILES (all pre-existing, unmodified by this iteration)
+------------------------------------------------------
+beatyourself/app/(app)/layout.tsx (7 lines)
+  - async server component
+  - calls `await requireSession()` then renders {children}
+  - requireSession (from TASK-007) calls auth() and
+    redirects('/login') if no session.user.id — so the gate
+    kicks in transparently for every page rendered under (app)/*
+
+beatyourself/app/(auth)/login/page.tsx (33 lines)
+  - async server component
+  - early-returns via redirect('/dashboard') if getSession()
+    yields a session.user.id — covers test_step 3
+    "Открыть /login будучи залогиненным — редирект на /dashboard"
+  - renders centered card with shadcn Button inside a
+    <form action={loginWithGoogle}>
+  - loginWithGoogle is inline 'use server' action that calls
+    signIn('google', { redirectTo: '/dashboard' }) — the
+    redirectTo parameter is the documented Auth.js v5 way to
+    pin the post-auth landing page (covers test_step 2)
+
+beatyourself/app/(app)/dashboard/page.tsx (13 lines)
+  - placeholder page showing greeting from session
+  - exists so test_step 1 (/dashboard → /login redirect) and
+    test_step 2 (/login → /dashboard after Google auth) have
+    a real route to land on
+  - calls requireSession() so the typing makes session.user
+    non-null at compile time (no `?.` noise in the JSX)
+
+VERIFICATION RESULTS
+--------------------
+Automatable gates (all clean):
+  - npm run lint — clean
+  - npm run typecheck — clean
+  - npm run format:check — All matched files use Prettier code style!
+  - npm test — 44/44 (10 cipher + 16 streaks + 18 progress, no
+    new tests per architectural_principles "Тесты пишем ТОЛЬКО
+    для streak calculation и token crypto")
+  - npm run build — ✓ Compiled successfully in 2.2s
+    Routes registered:
+      ○ /
+      ○ /_not-found
+      ƒ /api/auth/[...nextauth]
+      ƒ /api/cron/check-deadlines
+      ƒ /dashboard         ← NEW (dynamic — uses requireSession)
+      ƒ /login             ← NEW (dynamic — uses getSession)
+      ○ /ui-test
+
+Live redirect smoke (started npm run dev with shell-overridden
+env vars to bypass the .env.local NEXTAUTH_URL trailing-quote
+typo from TASK-003):
+
+  curl GET /dashboard (no cookie):
+    → status=307
+    → Location: http://localhost:3000/login    ✓ test_step 1
+
+  curl GET /login (no cookie):
+    → status=200                                ✓ login renders
+
+  curl GET /water (no cookie):
+    → status=404
+    → No redirect (page.tsx doesn't exist yet)
+
+  The /water 404 is INFORMATIVE: it confirms the layout's gate
+  is wired correctly to the route group. Routes that don't exist
+  return 404; routes that do exist redirect when unauthed. The
+  moment TASK-026/027 lands a page.tsx in (app)/water, it auto-
+  inherits the gate — no per-page boilerplate.
+
+HARNESS LIMITATION (consistent with TASK-007 verification gap)
+--------------------------------------------------------------
+test_step 2 ("Войти через Google — редирект обратно на
+/dashboard") requires a real Google OAuth handshake against the
+user's Google Cloud Console OAuth app. I cannot execute this
+from the harness — same as TASK-007.
+
+Code-review proxy verifications:
+  - signIn('google', { redirectTo: '/dashboard' }) — the
+    redirectTo arg is documented Auth.js v5 API; on success the
+    user lands at /dashboard
+  - app/api/auth/[...nextauth]/route.ts is registered (build
+    output shows ƒ /api/auth/[...nextauth])
+  - signIn callback (lib/auth/config.ts) is exercised in
+    TASK-007's smoke against the live Neon DB
+
+The user must hand-execute the browser flow for full sign-off.
+
+DESIGN DECISIONS WORTH FLAGGING
+-------------------------------
+1) Layout is the world's smallest async component:
+     await requireSession();
+     return <>{children}</>;
+   That's deliberate — TASK-008 only requires the auth gate.
+   TASK-009 (next pending) will mount the responsive nav
+   (BottomNav for <1024px, Sidebar for >=1024px) inside this
+   layout, AND mount the sonner Toaster (per TASK-002 progress
+   note recommendation: Toaster belongs in (app) layout, not
+   root, so /login stays minimal).
+
+2) Did NOT redirect / to /dashboard in this iteration. The root
+   app/page.tsx is still the default Next.js scaffold. TASK-008
+   doesn't require it. Moving / → /dashboard|/login is a small
+   future cleanup but not in scope here (and would touch a file
+   not in the TASK-008 acceptance list, violating the "no
+   попутного рефакторинга" rule from agent_instructions).
+
+3) Did NOT mount sonner Toaster in (app)/layout.tsx in this
+   iteration. TASK-002's progress note recommended it, but it's
+   not a TASK-008 acceptance criterion, and adding it would
+   require either a 'use client' directive on the layout (defeats
+   the server-side requireSession gate's simplicity) or moving
+   Toaster mount logic into a client component nested below.
+   Best handled in TASK-009 alongside the nav scaffolding, or
+   in TASK-018 ActivityForm (the first task that calls toast()).
+
+4) login/page.tsx uses getSession (not requireSession): correct.
+   We need to allow unauthed visitors (the whole point of /login)
+   AND redirect already-authed visitors to /dashboard. Inverse
+   of the protected layout's logic.
+
+5) Empty (app)/* subdirectories (challenges, profile, water,
+   weight) exist as scaffolded folders. They have no page.tsx
+   yet, so they 404. This is fine: routing 404 is the right
+   behavior for routes that don't exist, and the moment a
+   page.tsx is added, it will inherit the gate from
+   (app)/layout.tsx.
+
+NOTES FOR NEXT ITERATIONS
+-------------------------
+- TASK-009 (responsive nav) is the next pending high-priority
+  task. It will:
+    * Add BottomNav for <1024px and Sidebar for >=1024px to
+      (app)/layout.tsx
+    * 5 nav items: Главная (/dashboard), Челленджи (/challenges),
+      Вода (/water), Вес (/weight), Профиль (/profile)
+    * BottomNav needs safe-area padding for iPhone:
+      pb-[max(env(safe-area-inset-bottom),1.5rem)]
+      (already used in components/ui/sheet.tsx for bottom sheets
+      per TASK-002 — good template)
+  Recommendation for TASK-009: when the nav lands, ALSO mount
+  the sonner <Toaster /> inside (app)/layout.tsx — that lets
+  TASK-018 ActivityForm and TASK-025 quick-add call toast()
+  without per-component Toaster mounting.
+
+- TASK-008 unblocks TASK-009 + everything else nested under
+  (app)/* (TASK-013-016 challenges, TASK-026-027 water,
+  TASK-028-029 weight, TASK-031 profile, TASK-021 dashboard
+  aggregation already done at TASK-022).
+
+- The .env.local NEXTAUTH_URL trailing-quote typo flagged in
+  TASK-003 STILL EXISTS. Tasks that need to actually run the
+  app against the dev server still must use shell-overridden
+  env vars. The user should fix it once and forget — it's
+  blocking automated dev-server smoke for every UI iteration
+  (TASK-002, TASK-007, TASK-008 all hit this).
+
+- Working tree at end of this iteration:
+    NEW (staged for TASK-008 commit):
+      beatyourself/app/(app)/dashboard/page.tsx
+      beatyourself/app/(app)/layout.tsx
+      beatyourself/app/(auth)/login/page.tsx
+    MODIFIED (staged for TASK-008 commit):
+      tasks.json (TASK-008 status: pending → done + notes)
+      progress.txt (this block)
+    PRE-EXISTING UNSTAGED (NOT touched, hands-off per prior policy):
+      ralph.sh modified
+      README.md deleted at repo root
