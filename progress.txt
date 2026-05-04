@@ -2253,3 +2253,233 @@ NOTES FOR NEXT ITERATIONS
     PRE-EXISTING UNSTAGED (NOT touched, hands-off per prior policy):
       ralph.sh modified
       README.md deleted at repo root
+
+
+================================================================
+2026-05-04 — TASK-012 (DONE) — Server actions for Challenge
+================================================================
+
+WHAT THIS TASK REQUIRED
+-----------------------
+TASK-012 acceptance criteria:
+  1) actions/challenges.ts begins with 'use server'
+  2) Exports: createChallengeAction, updateChallengeAction,
+     deleteChallengeAction
+  3) Each action: requireSession() → zod safeParse → service call
+  4) Returns { success: true, data } | { success: false, error }
+  5) After mutations: revalidatePath('/challenges') and/or
+     revalidatePath('/dashboard')
+
+PRD test_steps:
+  1) Valid form data → challenge created + revalidate
+  2) Without session → action throws unauthorized
+  3) Invalid data → { success: false, error }
+
+PICK RATIONALE
+--------------
+Pending high-priority tasks with deps satisfied at iteration
+start: TASK-009 (responsive nav), TASK-012 (server actions),
+TASK-023 (streak block), TASK-024 (active challenges block).
+
+Picked TASK-012 because:
+  - Pure backend logic — verifiable in this harness without
+    visual sign-off (UI tasks 023/024 need browser eyeball)
+  - Unblocks the entire challenges UI chain (013→014→015
+    all depend transitively on TASK-012)
+  - Smallest reasonable atomic unit: wrap an existing service
+    in 3 server actions, no new domain model required
+  - Matches the architectural_principles directive
+    "Server actions — основной путь для мутаций" by laying
+    the first stone in the actions/ directory (it was empty
+    save for .gitkeep at iteration start)
+
+DESIGN DECISIONS WORTH FLAGGING
+-------------------------------
+1) STRUCTURAL: revalidatePath calls happen AFTER the try/catch
+   around the mutation, NOT inside it. Reason: if revalidatePath
+   throws (e.g., misconfigured cacheComponents in the future, a
+   Next internals bug, or test environments without a request
+   context), that should NOT surface as a mutation failure
+   to the caller. The DB write already succeeded; reporting
+   {success:false} would mislead the form into showing an
+   error toast and the user into thinking they need to retry.
+
+   Shape:
+     mutate → try/catch
+       on failure: return {success:false, error}
+     (try block exits)
+     revalidateChallengeViews()   ← outside catch
+     return {success:true, data}
+
+   This bug was caught during smoke-test development: the
+   first version had revalidatePath inside the try, and the
+   first 4 test cases (valid create / valid update / strip
+   fields / valid delete) all returned success:false with
+   error="Invariant: static generation store missing in
+   revalidatePath /challenges" — the DB writes succeeded but
+   the revalidate threw and got swallowed as a mutation error.
+   Restructure fixed it; the 5 already-failing-before-revalidate
+   tests (zod errors, IDOR, etc.) still pass because they
+   never reach the revalidate call.
+
+2) UN-AUTHED PATH: requireSession() in lib/auth/session.ts
+   calls auth() then redirect('/login') from next/navigation
+   when session.user.id is missing. redirect() throws
+   NEXT_REDIRECT (a control-flow exception). For server
+   actions invoked via the React server-action POST, Next.js
+   catches NEXT_REDIRECT and turns it into a 307 response —
+   the user lands at /login. That IS the "throws unauthorized"
+   behavior required by test_step 2.
+
+   I deliberately did NOT add a defensive
+   `if (!session) return {success:false, error:'Unauthorized'}`
+   guard — that would be unreachable code (requireSession
+   never returns when session is missing) and would mask the
+   real UX which is "redirect, not stay-on-page-with-error".
+
+3) ACTION SIGNATURE: actions take `input: unknown` and
+   safeParse with the existing schemas from TASK-010. The
+   alternative — taking FormData and extracting per-field —
+   was rejected because:
+     * react-hook-form (already a dep) submits typed objects,
+       not FormData, so the form pattern in TASK-014 wants
+       object input
+     * z.coerce.date() in createChallengeSchema handles ISO
+       date strings from <input type=date> directly
+     * Separating object-vs-FormData would require two
+       parallel action variants — premature abstraction
+
+4) ERROR FORMATTING: formatZodError joins all issues with
+   '; ' so a form can show every problem at once via a single
+   toast. Issue path falls back to "input" for refine-level
+   errors that have an empty path. If a future task wants
+   field-level errors (e.g., setError per path), that's a
+   contract change — would expand the result to include
+   issue list, not a string. Doesn't block TASK-014.
+
+5) revalidateChallengeViews() always revalidates /challenges
+   AND /dashboard (per acceptance criterion 5). Additionally
+   revalidates /challenges/[id] for create + update so the
+   detail page (TASK-032) sees fresh data. Delete revalidates
+   only the list views — the detail page will 404 after
+   delete anyway.
+
+VERIFICATION RESULTS
+--------------------
+Per architectural_principles "CRUD не покрываем unit-тестами"
++ "Тесты пишем ТОЛЬКО для streak calculation и token crypto":
+no permanent test file added. Wrote temporary
+actions/_smoke-challenges.test.ts (10 vitest cases against
+live Neon, deleted after run).
+
+Mocking strategy in the smoke:
+  - vi.hoisted to define sessionMock + requireSessionMock
+    BEFORE the action module imports
+  - vi.mock("@/lib/auth/session") returning the mock
+  - vi.mock("next/cache") with revalidatePath: vi.fn()
+    because vitest has no Next.js request context — bare
+    revalidatePath throws "Invariant: static generation
+    store missing". This is a TEST-CONTEXT issue only;
+    real server-action POSTs always have the request context
+
+Smoke test_steps coverage:
+  PRD test_step 1 ("valid → created + revalidated"):
+    - case 1: createChallengeAction valid input →
+      {success:true} with userId=ownerId, status='active',
+      currentValue=0, row in DB
+
+  PRD test_step 2 ("without session → unauthorized"):
+    - case 10: requireSessionMock throws synthetic
+      NEXT_REDIRECT error → action propagates the throw
+      → awaited promise rejects with /NEXT_REDIRECT/
+
+  PRD test_step 3 ("invalid → success:false"):
+    - case 2: empty title + targetValue=0 + endDate<startDate
+      → {success:false, error contains 'title','targetValue',
+      'endDate'}
+
+  Bonus IDOR + edge cases:
+    - case 3: updateChallengeAction owner editable fields
+    - case 4: updateChallengeAction stripped read-only fields
+      (targetValue, metric) — schema drops them, DB unchanged
+    - case 5: updateChallengeAction cross-user id →
+      {success:false, error:'Challenge not found'}
+    - case 6: updateChallengeAction with endDate<startDate
+      → service throws → {success:false, error matches /end
+      date/i}
+    - case 7: deleteChallengeAction owner → row removed
+    - case 8: deleteChallengeAction cross-user → row remains
+    - case 9: deleteChallengeAction empty id → 'Challenge id
+      is required' (inline guard, no DB touch)
+
+Final results: 10/10 smoke + 44/44 perm tests (10 cipher +
+16 streaks + 18 progress).
+
+Build gates:
+  - npm run typecheck — clean
+  - npm run lint — clean
+  - npm run format:check — clean (after one prettier --write
+    pass; the file was over the 100-char line width on the
+    long import statement)
+  - npm test — 44/44 unaffected after smoke deletion
+  - npm run build — ✓ Compiled successfully in 2.0s
+    Routes unchanged from TASK-008:
+      ○ /
+      ○ /_not-found
+      ƒ /api/auth/[...nextauth]
+      ƒ /api/cron/check-deadlines
+      ƒ /dashboard
+      ƒ /login
+      ○ /ui-test
+    (Server actions are not separate routes — they're served
+    via the existing route handlers' POST. The new actions/
+    file shows up in the server bundle but doesn't add a
+    URL.)
+
+HARNESS LIMITATION
+------------------
+The PRD test_step 1 phrase "страница ревалидирована" can't
+be browser-verified from this harness — that requires a
+running Next.js dev server with a real browser session and
+network inspector to confirm the action's response includes
+the revalidate hint and the page re-renders.
+
+Code-review proxy verifications:
+  - revalidatePath is imported from "next/cache" (the
+    canonical Next.js API)
+  - revalidateChallengeViews is called only after a
+    successful mutation (verified by the smoke's
+    revalidatePath mock — it WAS called when expected)
+
+NOTES FOR NEXT ITERATIONS
+-------------------------
+- TASK-013 (challenges list page) + TASK-014 (create form)
+  + TASK-015 (edit form) all directly consume TASK-012's
+  actions. ActionResult<T> is exported, so:
+    * Form code: `if (result.success) toast.success(...)
+      else toast.error(result.error)`
+    * Multi-issue zod errors come back as a single
+      semicolon-joined string — fine for a form-level
+      toast. Field-level errors require a contract change.
+- The form's onSubmit MUST NOT swallow exceptions — let
+  NEXT_REDIRECT propagate so Next.js sends the 307 to
+  /login when the session is gone. Wrapping the call in
+  a try/catch that catches all errors will break the
+  un-authed redirect UX.
+- TASK-014 form's <input type=date> will produce
+  'YYYY-MM-DD' strings — z.coerce.date() handles those
+  directly. No need to parse dates client-side.
+- The .env.local NEXTAUTH_URL trailing-quote typo (line
+  9) STILL exists. Same workaround as prior iterations:
+  `set -a && . ../.env.local` won't work. Use shell-only
+  exports for the keys you need to bypass the typo.
+- Working tree at end of iteration:
+    NEW (staged for TASK-012 commit):
+      beatyourself/actions/challenges.ts
+    MODIFIED (staged for TASK-012 commit):
+      tasks.json (TASK-012 status: pending → done + notes)
+      progress.txt (this block)
+    PRE-EXISTING UNSTAGED (NOT touched, hands-off per
+    prior policy):
+      ralph.sh modified
+      README.md deleted at repo root
