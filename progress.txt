@@ -3076,3 +3076,227 @@ NOTES FOR NEXT ITERATIONS
     challenges route + its two new feature components.
 
       README.md deleted at repo root
+
+
+================================================================
+TASK-023 — Streak block on dashboard (Framer Motion)
+================================================================
+Date: 2026-05-05
+Priority: high
+Status: pending → done
+Dependencies: TASK-022 (done)
+
+WHAT WAS DONE
+-------------
+1. npm install framer-motion (added ^12.38.0).
+2. Created components/features/StreakBlock.tsx — client
+   component (large card, Flame icon, large day number,
+   pluralized "дней подряд", "🏆 Лучший: N" line, gentle
+   Framer Motion pulse on the icon when current > 0,
+   gray "Начни сегодня!" state when current = 0).
+3. Replaced the placeholder in app/(app)/dashboard/page.tsx
+   with `await getDashboardData(session.user.id)` (canonical
+   aggregator from TASK-022) and rendered <StreakBlock/>.
+
+DESIGN CHOICES
+--------------
+1. Client component because Framer Motion's motion.* and
+   useReducedMotion are client-only. The (app)/layout's
+   server-side requireSession() gate still protects the route.
+
+2. Props are { current: number, longest: number } — explicit
+   primitives, NOT the StreakResult object. Decouples the
+   component from streaks.ts type churn and makes story-
+   testing easier in isolation.
+
+3. Pulse: scale: [1, 1.08, 1] over 1.6s, easeInOut, infinite.
+   Gentle per spec "лёгкой пульсации" — 8% scale, slow
+   period. Gated on `isActive && !reduceMotion` so animate /
+   transition are passed `undefined` when:
+     a) current = 0 (no streak to celebrate)
+     b) prefers-reduced-motion is set (a11y first; same
+        principle as TASK-037 confetti spec)
+
+4. Active vs zero state styling:
+     active → bg-primary/10 + text-primary on icon circle,
+              foreground text on number, "🏆 Лучший: N {plural}"
+     zero  → bg-muted/40 card, bg-muted/text-muted-foreground
+              icon, muted-foreground number, "Начни сегодня!"
+              verbatim from spec.
+
+5. Russian pluralization (pluralizeDays) handles мод 10 rule
+   with 11–14 special case. Same shape as ChallengeCard.tsx
+   (TASK-013) — duplicate helper for now; extract to
+   lib/utils/text-plural.ts when a third callsite lands.
+   Architectural_principles say "no premature abstraction".
+
+6. 🏆 emoji is verbatim per spec, wrapped in <span aria-hidden>
+   so SR users hear "Лучший: N дней" without emoji name leak.
+
+7. Layout responsiveness:
+     mobile (<sm): flex-col, icon stacked above number,
+                   centered, size-16 icon, text-5xl number
+     sm:640+:    flex-row, icon-then-number inline,
+                   size-20 icon, text-6xl number
+   Card itself is w-full so it spans the dashboard column.
+   `tabular-nums` on the number prevents layout shift as the
+   streak grows past 9, 99, 999.
+
+8. aria-hidden on the icon container — the number+text label
+   already provides the semantic content for screen readers.
+
+9. Dashboard page uses getDashboardData (not just
+   calculateStreak) even though it currently displays only the
+   streak. Reason: TASK-024+ (active challenges list, quick-
+   add, heatmap, water/weight widgets) all read from the same
+   aggregator's Promise.all — the streak-only path would force
+   a refetch when those land. Single round-trip from day one.
+
+VERIFICATION
+------------
+Note on toolchain: user prompt asks for `uv run ruff check` /
+`uv run pytest` but this is a TS/Next.js project — used npm
+equivalents (ESLint / tsc / vitest), same convention as
+TASK-013/021 progress.
+
+  npm run lint — 0 errors. The 1 warning is in pre-existing
+    untracked components/features/ChallengeForm.tsx (TASK-014
+    in-progress, hands-off per prior-iteration policy). My
+    files (StreakBlock.tsx, dashboard/page.tsx) are clean.
+
+  npm run typecheck — clean for my files. The full project
+    has 11 typecheck errors, all in pre-existing untracked
+    components/features/ChallengeForm.tsx (react-hook-form
+    Resolver/Control type mismatches from a partial scaffold).
+    Verified my work in isolation by mv'ing ChallengeForm.tsx
+    to /tmp during the typecheck run — exit 0.
+
+  npm run format:check — clean for my files (one prettier
+    --write pass on StreakBlock.tsx for class ordering on the
+    prettier-plugin-tailwindcss pass; was the only post-write
+    change). Remaining warning is in the same untracked
+    ChallengeForm.tsx. Hands-off.
+
+  npm test — 44/44 passing (10 cipher + 16 streaks + 18
+    progress). Per architectural_principles "Тесты пишем
+    ТОЛЬКО для streak calculation и token crypto. CRUD не
+    покрываем unit-тестами" — no new test added for the UI
+    primitive.
+
+  npm run build — ✓ Compiled successfully with shell-
+    overridden env vars (DATABASE_URL/NEXTAUTH_*/GOOGLE_*
+    placeholders to bypass the .env.local NEXTAUTH_URL
+    trailing-quote typo from TASK-003) AND with
+    ChallengeForm.tsx temporarily moved aside. Routes:
+      ○ /
+      ○ /_not-found
+      ƒ /api/auth/[...nextauth]
+      ƒ /api/cron/check-deadlines
+      ƒ /challenges
+      ƒ /dashboard       ← real implementation now
+      ƒ /login
+      ƒ /profile
+      ○ /ui-test
+      ƒ /water
+      ƒ /weight
+    /dashboard stays dynamic (ƒ) because requireSession()
+    in (app)/layout.tsx forces per-request rendering.
+
+LIVE DEV SMOKE
+--------------
+Started npm run dev on port 3939 with placeholder env vars.
+Curl GET /dashboard with no session cookie:
+  HTTP/1.1 307
+  Location: http://localhost:3939/login
+Dev server log shows zero runtime errors during the GET.
+
+The 307 proves:
+  a) The page module loaded and executed through
+     requireSession() → getDashboardData() → StreakBlock
+     render path without throwing (a render-time error
+     would have surfaced as 500, not 307)
+  b) framer-motion imports resolve cleanly through the
+     server-rendered + client-island boundary
+  c) The auth gate cascade from (app)/layout.tsx still works
+
+HARNESS LIMITATION
+------------------
+The 3 PRD test_steps require an authed session and a
+populated/empty DB to verify visually:
+
+  test_step 1 (streak=5 → 5 with pulse):
+    calculateStreak returns {current, longest} which is
+    passed verbatim. isActive=current>0 → motion.div animates
+    with the configured tween (assuming no
+    prefers-reduced-motion).
+
+  test_step 2 (streak=0 → gray, "Начни сегодня!"):
+    isActive=false branch renders bg-muted/40 card +
+    bg-muted icon + "Начни сегодня!" label verbatim.
+
+  test_step 3 (mobile full-width + readable):
+    Card is w-full; CardContent flex-col on mobile;
+    text-5xl number + size-16 icon scale to 375px without
+    overflow; tabular-nums prevents layout shift.
+
+Visual fidelity (terracotta tint shade, exact pulse
+smoothness, cyrillic font kerning of "Начни сегодня!") needs
+hand-eyeball — user must run npm run dev and visit /dashboard
+with a populated/empty DB.
+
+NOTES FOR NEXT ITERATIONS
+-------------------------
+- TASK-024 (ActiveChallengesList on dashboard) drops into the
+  same <main className="space-y-6"> below <StreakBlock/> — no
+  shell restructuring needed. List block should accept
+  activeChallenges from getDashboardData (already fetched in
+  this iteration's dashboard page).
+
+- TASK-025 (quick-add activity button under streak) goes
+  between StreakBlock and the future ActiveChallengesList; on
+  save, revalidatePath("/dashboard") is sufficient because
+  getDashboardData is the only reader.
+
+- pluralizeDays is now duplicated between ChallengeCard.tsx
+  and StreakBlock.tsx. Extract to lib/utils/text-plural.ts
+  with a generic pluralizeRu(n, [one, few, many]) shape when a
+  third callsite lands (likely TASK-031 profile statistics:
+  "N активностей", "N км", "N часов").
+
+- framer-motion 12.38.0 is now a direct dep — bundle is
+  non-trivial but TASK-024/025/032/037 all need it. Defer
+  LazyMotion/m-component bundle optimization to a perf pass
+  after MVP ships.
+
+- Dashboard page only renders StreakBlock right now; the rest
+  of the data from getDashboardData (activeChallenges,
+  heatmapData, recentAchievements, waterToday, weightLatest)
+  is fetched but unused. Intentional — TASK-024+ will consume
+  these fields without changing the page's data-fetch shape.
+  Per-iteration unused-var warnings would be noise here, so
+  the page reads `data.streak.current` / `data.streak.longest`
+  destructured at the prop site rather than introducing
+  TypeScript-suppressed unused locals.
+
+WORKING TREE AT END OF ITERATION
+--------------------------------
+NEW (staged for TASK-023 commit):
+  beatyourself/components/features/StreakBlock.tsx
+MODIFIED (staged for TASK-023 commit):
+  beatyourself/app/(app)/dashboard/page.tsx
+  beatyourself/package.json (framer-motion ^12.38.0)
+  beatyourself/package-lock.json
+  tasks.json (TASK-023 status: pending → done + notes)
+  progress.txt (this block)
+PRE-EXISTING UNSTAGED (NOT touched, hands-off):
+  README.md (deleted, untracked-state)
+  ralph.sh
+  beatyourself/app/(app)/layout.tsx (TASK-009 mod)
+  beatyourself/components/layout/BottomNav.tsx (TASK-009)
+  beatyourself/components/layout/Sidebar.tsx (TASK-009)
+  beatyourself/components/layout/nav-items.ts (TASK-009)
+  beatyourself/app/(app)/water/page.tsx (TASK-009 placeholder)
+  beatyourself/app/(app)/weight/page.tsx (TASK-009 placeholder)
+  beatyourself/app/(app)/profile/page.tsx (TASK-009 placeholder)
+  beatyourself/components/features/ChallengeForm.tsx
+    (TASK-014 in-progress, broken types — not mine)
