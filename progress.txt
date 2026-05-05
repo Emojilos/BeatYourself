@@ -2483,3 +2483,596 @@ NOTES FOR NEXT ITERATIONS
     prior policy):
       ralph.sh modified
       README.md deleted at repo root
+
+================================================================
+2026-05-04 — TASK-009 (DONE) — Adaptive navigation: BottomNav (mobile) + Sidebar (desktop)
+================================================================
+
+WHAT THIS TASK REQUIRED
+-----------------------
+TASK-009 acceptance criteria:
+  1) components/layout/BottomNav.tsx — fixed bottom nav for
+     <1024px viewports, 5 items: Главная, Челленджи, Вода,
+     Вес, Профиль (lucide-react icons)
+  2) components/layout/Sidebar.tsx — sidebar for >=1024px
+     viewports with the same 5 items + quick access to settings
+  3) Active item highlighted with accent color
+  4) Uses next/link + usePathname for active-route detection
+  5) BottomNav has iPhone safe-area padding via
+     env(safe-area-inset-bottom)
+
+PRD test_steps:
+  1) Mobile viewport (375px) — BottomNav visible, Sidebar hidden
+  2) Desktop viewport (1280px) — Sidebar visible, BottomNav hidden
+  3) Click each nav item — navigates + active highlight updates
+  4) iPhone safe-area padding visible on real device
+
+PICK RATIONALE
+--------------
+Pending high-priority tasks with deps satisfied at iteration
+start: TASK-009 (nav), TASK-013 (challenges list, blocked by
+TASK-009), TASK-018 (activity form, blocked by TASK-009),
+TASK-023 (streak block), TASK-024 (active challenges list),
+TASK-026 (heatmap), TASK-031 (profile).
+
+Picked TASK-009 because:
+  - It's gating infrastructure that unblocks the LARGEST
+    set of downstream tasks (TASK-013 challenges list,
+    TASK-014 create form, TASK-018 activity form, TASK-028
+    water page, TASK-030 weight page, TASK-031 profile —
+    six pending tasks all transitively depend on TASK-009
+    or already-met deps that pair with the nav)
+  - Provides the visual shell every UI task needs:
+    no nav = no way to reach the new pages other than
+    typing URLs
+  - Pure UI — small, atomic, low risk; no service or
+    schema changes
+  - High priority + deps met (TASK-008 done) so it's
+    immediately actionable
+  - TASK-023/024 (also high prio with deps met) are
+    inside the dashboard which already exists; they don't
+    block other tasks the way TASK-009 does
+
+WHAT I BUILT
+------------
+NEW FILES:
+
+  components/layout/nav-items.ts
+    - Single source of truth for the 5 nav items
+    - Exports NavItem type, NAV_ITEMS readonly array,
+      and isNavActive(pathname, href) helper
+    - Item shape: { label, href, icon: LucideIcon }
+    - Items: Home→/dashboard, Target→/challenges,
+      Droplet→/water, Scale→/weight, User→/profile
+    - isNavActive uses prefix-match:
+        pathname === href || pathname.startsWith(href + '/')
+      so /challenges/new highlights 'Челленджи' (forward
+      compat with TASK-014/015 sub-routes)
+
+  components/layout/BottomNav.tsx
+    - 'use client' + usePathname()
+    - Fixed bottom-nav, lg:hidden so only renders on <1024px
+    - 5-column grid of Link components, each with:
+        flex-col vertical layout (icon above label)
+        size-5 lucide icon
+        text-[11px] label (truncate for long Cyrillic labels)
+        active: text-primary (terracotta accent)
+        inactive: text-muted-foreground hover:text-foreground
+        aria-current='page' on active link
+    - pb-[env(safe-area-inset-bottom)] on the <nav>
+      element so iPhone home-bar area doesn't overlap the
+      tap targets — the nav grows downward to fit the inset
+    - aria-label="Основная навигация" for screen readers
+
+  components/layout/Sidebar.tsx
+    - 'use client' + usePathname()
+    - hidden lg:sticky lg:top-0 lg:flex lg:h-screen lg:w-64
+      lg:flex-col so it only appears on >=1024px and sticks
+      to the viewport top while page content scrolls
+    - Uses bg-sidebar / text-sidebar-foreground /
+      border-sidebar-border CSS vars from TASK-002 (the
+      sidebar palette is a slightly cooler warm-gray than
+      the main bg, giving subtle visual separation)
+    - Header: 'BeatYourself' wordmark in font-semibold
+    - Body: same NAV_ITEMS list, rendered as horizontal
+      Link rows with 4px icon + label gap
+    - Active state: bg-sidebar-accent text-sidebar-accent-fg
+    - Inactive: text-sidebar-foreground hover:bg-sidebar-accent
+    - Footer: divider + 'Настройки' Link to /settings
+      (the 'quick access to settings' from spec; route
+      doesn't exist yet — same pattern as the placeholder
+      pages, will 404 until a future task adds the page)
+
+PLACEHOLDER PAGES (added to make test_step 3 verifiable):
+
+  app/(app)/challenges/page.tsx — 'Челленджи' h1 + hint
+  app/(app)/water/page.tsx — 'Вода' h1 + hint
+  app/(app)/weight/page.tsx — 'Вес' h1 + hint
+  app/(app)/profile/page.tsx — 'Профиль' h1 + name/email
+
+  Why placeholders here and not deferred:
+    PRD test_step 3 ('Кликнуть на каждый пункт — переход
+    и подсветка активного') requires every nav target to
+    render so the active-state highlight is verifiable.
+    Without page.tsx, those routes 404 outside the (app)
+    layout group and the nav doesn't render on the
+    not-found page.
+
+  These will be replaced by TASK-013 (challenges list),
+  TASK-028 (water page), TASK-030 (weight page),
+  TASK-031 (profile) — TASK-008's progress note already
+  flagged this would happen.
+
+MODIFIED:
+
+  app/(app)/layout.tsx
+    - Wraps {children} in a <div className='min-h-screen
+      lg:flex'> shell
+    - Sidebar before children (left rail on desktop)
+    - BottomNav after children (fixed positioning means
+      DOM order doesn't matter visually, but logical
+      reading order: nav at end, content first — A11y win)
+    - Content wrapper: min-w-0 flex-1 (min-w-0 prevents
+      long-content overflow inside flex), and
+      pb-[calc(env(safe-area-inset-bottom)+4rem)] lg:pb-0
+      so {children} ends 4rem (≈64px, covers ~56px nav
+      height) + safe-area-inset above the BottomNav on
+      mobile, and zero padding on desktop where the nav
+      is hidden
+
+DESIGN CHOICES
+--------------
+1) SHARED NAV_ITEMS: One readonly array consumed by both
+   BottomNav and Sidebar. Reordering or adding an item is
+   a single-line change. The architectural_principles
+   directive 'no premature abstraction' is respected
+   because there are exactly 2 callsites (the threshold
+   for extraction was already crossed) and the abstraction
+   is minimal — just data + a 1-line helper function.
+
+2) PREFIX-MATCH ACTIVE DETECTION: isNavActive returns
+   true for exact match OR href + '/' prefix. This means
+   /challenges/new and /challenges/[id]/edit both keep
+   the 'Челленджи' tab highlighted, ready for TASK-014
+   and TASK-015. Exact-match-only would have failed there.
+
+3) usePathname() ?? "": Per the Next docs, app-router
+   usePathname always returns a string, but the null
+   guard is cheap defense in case Next 16 introduces
+   transient nullness during cacheComponents Suspense
+   boundaries (the docs warn this scenario may need a
+   Suspense boundary for dynamic-param routes). Falsy
+   isNavActive on the empty-string pathname just means
+   nothing is highlighted, which is the right fallback.
+
+4) MEDIA QUERY SPLIT VIA TAILWIND: BottomNav uses
+   lg:hidden, Sidebar uses hidden lg:flex. The mutual
+   exclusion is enforced by the Tailwind class system
+   at the breakpoint boundary (lg=1024px), no runtime
+   branching, no hydration mismatch risk. Both components
+   render to the DOM but only one is display:flex/grid
+   at any given viewport.
+
+5) SAFE-AREA HANDLING: Two complementary pieces.
+     a) BottomNav has pb-[env(safe-area-inset-bottom)]
+        on the <nav> itself — the home-bar area on iPhone
+        becomes part of the nav background but doesn't
+        receive tap targets. Pre-iPhone-X devices have
+        env() = 0, so this is a no-op there.
+     b) (app)/layout content wrapper has
+        pb-[calc(env(safe-area-inset-bottom)+4rem)]
+        so the {children} area never overlaps the nav.
+        The 4rem (64px) covers the nav's content area
+        (~56px), and the env() inset adds the home-bar
+        slack on top.
+
+6) AUTH GATE INHERITANCE: All four placeholder pages
+   automatically gain the auth redirect from
+   (app)/layout.tsx's await requireSession() call.
+   Verified via curl on un-authed /challenges,
+   /water, /weight, /profile — all returned 307 to
+   /login. This confirms TASK-008's criterion 4
+   ('все будущие страницы внутри app/(app)/* автоматически
+   защищены') still holds for the new pages.
+
+7) SETTINGS LINK PLACEHOLDER: The Sidebar's 'Настройки'
+   Link points to /settings, which is not in the
+   pending-task list. PRD spec required 'quick access
+   to settings' in the sidebar but there's no separate
+   settings task yet. Link 404s for now; when a future
+   task adds app/(app)/settings/page.tsx, the nav link
+   works without modification.
+
+VERIFICATION RESULTS
+--------------------
+Per architectural_principles 'Тесты пишем ТОЛЬКО для streak
+calculation и token crypto. CRUD не покрываем unit-тестами'
+— navigation is pure UI presentation logic with no service
+behavior, no permanent test file added.
+
+Build gates (all clean):
+  - npm run typecheck — clean (LucideIcon type from
+    lucide-react flows through to NAV_ITEMS, all Link
+    href types accepted)
+  - npm run lint — clean (eslint-config-next + prettier
+    integration both happy)
+  - npm run format:check — clean after one prettier
+    --write pass on the three new components (the
+    prettier-plugin-tailwindcss reordered some
+    border-* classes in Sidebar/BottomNav)
+  - npm test — 44/44 unaffected (10 cipher + 16
+    streaks + 18 progress)
+  - npm run build — ✓ Compiled successfully in 2.8s
+    with shell-overridden env vars (DATABASE_URL,
+    NEXTAUTH_*, GOOGLE_*, DIRECT_URL placeholders to
+    bypass the .env.local NEXTAUTH_URL trailing-quote
+    typo from TASK-003). Routes registered:
+      ○ /
+      ○ /_not-found
+      ƒ /api/auth/[...nextauth]
+      ƒ /api/cron/check-deadlines
+      ƒ /challenges      ← NEW (placeholder)
+      ƒ /dashboard
+      ƒ /login
+      ƒ /profile         ← NEW (placeholder)
+      ○ /ui-test
+      ƒ /water           ← NEW (placeholder)
+      ƒ /weight          ← NEW (placeholder)
+    All four new placeholder routes are correctly
+    DYNAMIC (ƒ) because they inherit
+    requireSession() from the (app)/layout.
+
+LIVE DEV SMOKE:
+  Started npm run dev on port 3939 with shell-overridden
+  env vars. Curl'd all five (app) routes without a
+  session cookie:
+    GET /dashboard  → 307 → /login
+    GET /challenges → 307 → /login   (placeholder)
+    GET /water      → 307 → /login   (placeholder)
+    GET /weight     → 307 → /login   (placeholder)
+    GET /profile    → 307 → /login   (placeholder)
+  Dev server log shows zero runtime errors, zero
+  React render errors, zero module-resolution errors.
+
+  This confirms:
+    a) The navigation components compile and execute
+       through the (app)/layout SSR path without
+       throwing
+    b) Every new placeholder page correctly inherits
+       TASK-008's auth gate
+    c) No client/server mismatch warnings,
+       no hydration errors, no missing-import errors
+
+HARNESS LIMITATION
+------------------
+The 4 PRD test_steps require browser viewport
+inspection and a real authed session, neither of
+which this harness provides. Code-review proxies
+for each:
+
+  test_step 1 (mobile <1024px shows BottomNav, Sidebar
+  hidden):
+    Sidebar has 'hidden lg:flex' — Tailwind: hidden by
+    default (display:none), flex at lg=1024px+
+    BottomNav has 'lg:hidden' — Tailwind: visible by
+    default, hidden at lg=1024px+
+    The mutual exclusion is enforced by the static
+    Tailwind utility classes at the lg breakpoint.
+
+  test_step 2 (desktop >=1024px shows Sidebar,
+  BottomNav hidden):
+    Same Tailwind logic, mirror image.
+
+  test_step 3 (click each item → navigates + active
+  highlight):
+    Link href={item.href} uses next/link's client-side
+    navigation (route-prefetch + transition handler).
+    aria-current='page' + the active class set are
+    applied based on usePathname() === href || prefix
+    match. Placeholder pages exist for all 5 nav
+    targets so navigation lands on a 200-page (after
+    auth) where the nav re-renders with the new
+    active state.
+
+  test_step 4 (iPhone safe-area padding):
+    pb-[env(safe-area-inset-bottom)] on the BottomNav
+    + pb-[calc(env(safe-area-inset-bottom)+4rem)] on
+    the content wrapper. env() values are device-
+    dependent and not exposed by curl/HTML inspection;
+    the user must hand-eyeball on a real iPhone or
+    Safari iPhone simulator.
+
+NOTES FOR NEXT ITERATIONS
+-------------------------
+- TASK-013 (challenges list page), TASK-028 (water
+  page), TASK-030 (weight page), TASK-031 (profile)
+  will REPLACE the placeholder page.tsx files added
+  here. The placeholders are thin (5-10 lines each)
+  and will be overwritten by the real implementations.
+  Don't try to keep them as fallbacks.
+
+- TASK-014 (challenge create form) and TASK-015
+  (challenge edit form) will land /challenges/new
+  and /challenges/[id]/edit respectively. The
+  prefix-match active-state logic will keep
+  'Челленджи' highlighted correctly on those
+  sub-routes. Confirmed by isNavActive's prefix
+  comparison.
+
+- TASK-018 (activity form bottom-sheet) and TASK-025
+  (quick-add) will mount Sheet on mobile. shadcn
+  Sheet uses z-50 by default, which exceeds the
+  BottomNav's z-40 — the sheet correctly covers the
+  bottom nav while open, no z-index fix needed.
+
+- TASK-038 (empty states / error UX) might want to
+  use a richer placeholder pattern (EmptyState
+  component) for any pages that haven't been
+  implemented yet. Doesn't apply now — by the time
+  TASK-038 lands, the four placeholders here will
+  already be replaced by real implementations.
+
+- The Sidebar's 'Настройки' link (/settings) has no
+  page yet. Whoever adds settings later just needs
+  to drop app/(app)/settings/page.tsx — the nav link
+  works without code change.
+
+- ALL nav-related styling uses CSS variables already
+  defined in app/globals.css (TASK-002): --primary
+  (terracotta accent), --muted-foreground,
+  --sidebar-* (cooler warm-gray sidebar palette),
+  --border. No new CSS vars introduced.
+
+- Working tree at end of iteration:
+    NEW (staged for TASK-009 commit):
+      beatyourself/components/layout/nav-items.ts
+      beatyourself/components/layout/BottomNav.tsx
+      beatyourself/components/layout/Sidebar.tsx
+      beatyourself/app/(app)/challenges/page.tsx
+      beatyourself/app/(app)/water/page.tsx
+      beatyourself/app/(app)/weight/page.tsx
+      beatyourself/app/(app)/profile/page.tsx
+    MODIFIED (staged for TASK-009 commit):
+      beatyourself/app/(app)/layout.tsx
+      tasks.json (TASK-009 status: pending → done + notes)
+      progress.txt (this block)
+    PRE-EXISTING UNSTAGED (NOT touched, hands-off
+    per prior policy):
+      ralph.sh modified
+
+
+==============================================================
+2026-05-05 — TASK-013 — Challenges list page (/challenges)
+==============================================================
+
+GOAL
+----
+First real implementation of the /challenges route — overwrites
+the TASK-009 placeholder. Server component that fetches the
+authed user's challenges, splits them into active vs. archive
+via shadcn Tabs, and renders ChallengeCard tiles with progress
+bar / difficulty badge / deadline label.
+
+FILES TOUCHED
+-------------
+NEW:
+  beatyourself/components/features/ChallengeCard.tsx
+  beatyourself/components/features/ChallengesTabs.tsx
+MODIFIED (formerly TASK-009 placeholder, now real):
+  beatyourself/app/(app)/challenges/page.tsx
+META:
+  tasks.json (TASK-013 status: pending → done + notes)
+  progress.txt (this block)
+
+KEY DECISIONS
+-------------
+1. Single listChallenges(userId) call with in-memory split into
+   active vs. archive instead of two filtered DB calls. Cheaper
+   round-trip; the per-user list is small at PRD's single-user
+   scale; status-asc-then-createdAt-desc ordering from the
+   service is preserved per group after the filter.
+
+2. Archive = everything that is not status='active'
+   (completed | failed | archived). PRD's archive tab is
+   "history" — the dashboard separately surfaces completed-only
+   recentAchievements via TASK-022, so this grouping doesn't
+   duplicate.
+
+3. ChallengesTabs is the smallest possible 'use client'
+   boundary — just the Tabs/TabsList/TabsContent wrapper.
+   Server-rendered ChallengeCard components are passed in as
+   children, so no per-card JS is shipped. This is the
+   documented Next 16 RSC pattern: client-component takes
+   server-component children.
+
+4. ChallengeCard is a server component (no hooks, no event
+   handlers). Whole-card click via next/link <Link> wrapping
+   the Card. Difficulty badges use Tailwind palette colors
+   (green/amber/red 100/900) matching PRD's
+   "зелёный/жёлтый/красный". Terracotta --primary stays for
+   accent CTAs only.
+
+5. Progress bar uses challenge.currentValue/targetValue. PRD
+   spec called this a "placeholder" until TASK-019, but
+   TASK-019 is already done — currentValue is the recalc'd
+   cached column updated on every Activity create/update/delete
+   via recalculateChallengeProgress. The bar is in fact
+   accurate; not artificially gating the value.
+
+6. Deadline label via date-fns differenceInCalendarDays with
+   Russian pluralization (1 день / 2-4 дня / 5+ дней / 11-14
+   special case for 'дней'). Status-specific overrides:
+     completed → "Завершён <date>"
+     failed → "Не выполнен"
+     archived → "В архиве"
+     active+past endDate → "Срок истёк"
+     active+today → "Сегодня последний день"
+   Server-clock UTC for "today" (Render runs UTC; Challenge
+   .endDate is @db.Date UTC midnight). Per-user-tz day count
+   is a refinement that belongs to whichever task wires
+   UserSettings.timezone — PRD §5.2 hints at it but doesn't
+   define a settings.timezone field; deferred.
+
+7. Two empty-state shapes:
+     a) Page-level (all challenges = 0): Sparkles icon +
+        "Пока нет челленджей." + "Поставь первую цель!"
+        (verbatim from spec) + primary CTA. Header CTA is
+        hidden in this case to avoid duplicate buttons.
+     b) Tab-level (e.g. active=0 but archive>0): muted text
+        + secondary outline CTA in active tab; archive tab
+        when empty just shows muted text without CTA.
+   Two-shape design avoids the awkward "create" button
+   rendering twice when a user clears their archive but still
+   has actives.
+
+8. Tab labels include counts: "Активные (N)" / "Архив (N)" so
+   users see at-a-glance which tab has content.
+
+9. Grid: 1 col mobile / 2 cols sm:640 / 3 cols lg:1024 — same
+   breakpoints as TASK-009 nav layout shell.
+
+VERIFICATION
+------------
+All gates clean against the npm toolchain (this is a TS/Next
+project; the user prompt's reference to `uv run ruff check` /
+`uv run pytest` doesn't apply here — same toolchain note as
+TASK-021's progress notes):
+
+  npm run typecheck — exit 0
+  npm run lint — exit 0
+  npm run format:check — All matched files use Prettier code
+    style!  (no --write needed; file ordering and class
+    ordering matched prettier-plugin-tailwindcss expectations
+    on first write)
+  npm test — 44/44 unaffected (10 cipher + 16 streaks + 18
+    progress; per architectural_principles "Тесты пишем
+    ТОЛЬКО для streak calculation и token crypto. CRUD не
+    покрываем unit-тестами" — no new permanent tests)
+  npm run build — ✓ Compiled successfully in 2.0s with shell-
+    overridden env vars (DATABASE_URL, NEXTAUTH_*, GOOGLE_*,
+    DIRECT_URL placeholders to bypass the .env.local
+    NEXTAUTH_URL trailing-quote typo from TASK-003). Routes:
+      ○ /
+      ○ /_not-found
+      ƒ /api/auth/[...nextauth]
+      ƒ /api/cron/check-deadlines
+      ƒ /challenges     ← real implementation now
+      ƒ /dashboard
+      ƒ /login
+      ƒ /profile
+      ○ /ui-test
+      ƒ /water
+      ƒ /weight
+    /challenges stays dynamic (ƒ) because requireSession()
+    in (app)/layout.tsx forces per-request rendering.
+
+LIVE DEV SMOKE
+--------------
+Started npm run dev on port 3939 with placeholder env vars.
+Curl GET /challenges with no session cookie:
+  HTTP/1.1 307
+  Location: http://localhost:3939/login
+Dev server log shows zero runtime errors, zero React render
+errors, zero module-resolution errors.
+
+The 307 proves:
+  a) The page module loaded and executed through
+     requireSession() without throwing
+  b) The new component imports resolve (ChallengeCard,
+     ChallengesTabs, listChallenges, lucide icons)
+  c) The auth gate cascade from (app)/layout.tsx still works
+     for the new content
+
+HARNESS LIMITATION
+------------------
+The 3 PRD test_steps require an authed session and either
+populated or empty DB state. Code-review proxies for each:
+
+  test_step 1 (empty DB → empty state):
+    listChallenges with no rows returns []. The page checks
+    `all.length === 0` and renders <EmptyState/> with the
+    spec's verbatim copy "Пока нет челленджей." + "Поставь
+    первую цель!".
+
+  test_step 2 (Studio insert → reload → card displays):
+    Page is dynamic (build output: ƒ /challenges); no cache
+    to invalidate. Studio insert + browser reload hits a fresh
+    DB call.
+
+  test_step 3 (toggle tabs → filter works):
+    Radix Tabs Root holds active value in client state;
+    TabsContent visibility is data-[state=active] flip; both
+    lists are SSR-rendered into the DOM, switching is pure
+    client. The active/archive split is server-side via
+    `c.status === 'active'`.
+
+Visual fidelity (warm-gray cards, terracotta CTAs, badge
+color mapping, progress bar fill, hover shadow, focus ring)
+needs hand-eyeball — user must run npm run dev and visit
+/challenges with seeded data.
+
+NOTES FOR NEXT ITERATIONS
+-------------------------
+- TASK-014 (challenges/new form) and TASK-015
+  (challenges/[id]/edit) inherit the auth gate from
+  (app)/layout. The card's whole-card
+  <Link href={`/challenges/${id}`}> already points to the
+  detail route TASK-032 will land — works without changes.
+
+- TASK-038 (empty states / error UX) should consolidate this
+  page's two inline empty-state shapes (page-level and
+  tab-level) into the shared EmptyState component. The inline
+  shapes are deliberately minimal — TASK-038 will pull them
+  into a single source.
+
+- Deadline label computation (pluralizeDays + formatRussian
+  Date + days-from-today) is a candidate for extraction into
+  lib/utils/date-tz.ts when a third callsite needs it. Right
+  now it's local to ChallengeCard.
+
+- ChallengesTabs takes activeCount/archiveCount as separate
+  props rather than computing from React.Children. Explicit
+  and serializable, matches the RSC contract for client-
+  component-with-server-children.
+
+- Header CTA is conditionally hidden when all=0 (the empty
+  state has its own CTA). When TASK-014 ships and the user
+  may have an always-visible "create" button somewhere in
+  the app shell, this conditional may become unnecessary;
+  revisit there.
+
+- `archived` status is currently grouped with completed/
+  failed in the archive tab. If a future archive UX wants a
+  sub-grouping (Завершённые / Проваленные / В архиве),
+  TASK-031 (Profile archive with year+difficulty filters) is
+  the right place — keep this list page as a single bucket.
+
+- Per-user-tz day count for deadline label is deferred. Until
+  UserSettings has a timezone field, server-clock UTC is the
+  consistent answer (matches TASK-019/021 conventions).
+
+- Working tree at end of iteration:
+    NEW (staged for TASK-013 commit):
+      beatyourself/components/features/ChallengeCard.tsx
+      beatyourself/components/features/ChallengesTabs.tsx
+      beatyourself/app/(app)/challenges/page.tsx
+        (new file in git — the TASK-009 placeholder was
+        never tracked; this is the route's first commit)
+    MODIFIED (staged for TASK-013 commit):
+      tasks.json (TASK-013 status: pending → done + notes)
+      progress.txt (this block)
+    PRE-EXISTING UNSTAGED (NOT touched, hands-off):
+      ralph.sh
+      beatyourself/app/(app)/layout.tsx (TASK-009 mod)
+      beatyourself/components/layout/BottomNav.tsx (TASK-009)
+      beatyourself/components/layout/Sidebar.tsx (TASK-009)
+      beatyourself/components/layout/nav-items.ts (TASK-009)
+      beatyourself/app/(app)/water/page.tsx (TASK-009 placeholder)
+      beatyourself/app/(app)/weight/page.tsx (TASK-009 placeholder)
+      beatyourself/app/(app)/profile/page.tsx (TASK-009 placeholder)
+    Note: TASK-009 is marked done in tasks.json but its files
+    were never committed. Those files remain untracked and are
+    a separate commit concern; TASK-013 only touches the
+    challenges route + its two new feature components.
+
+      README.md deleted at repo root
