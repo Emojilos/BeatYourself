@@ -2,10 +2,23 @@
 set -e
 
 TASKS_FILE="tasks.json"
+PROGRESS_FILE="progress.txt"
+APP_DIR="beatyourself"
+MAX_STUCK=3
 
-# Agent selection:
-# - Set RALPH_AGENT=claude or RALPH_AGENT=codex to force.
-# - Otherwise auto-detect (prefers Claude if available).
+# Озвучка с кросс-платформенным фолбэком (на Linux/Windows say отсутствует).
+speak() {
+    local text="$1"
+    if command -v say >/dev/null 2>&1; then
+        say -v Milena "$text" 2>/dev/null || true
+    else
+        echo "🗣️  $text"
+    fi
+}
+
+# Выбор агента:
+# - RALPH_AGENT=claude|codex — принудительный выбор.
+# - Иначе автодетект (предпочитаем claude).
 resolve_agent() {
     if [[ -n "${RALPH_AGENT:-}" ]]; then
         echo "$RALPH_AGENT"
@@ -33,7 +46,6 @@ run_agent() {
         codex)
             local output_file
             output_file="$(mktemp -t ralph_codex.XXXXXX)"
-            # Use non-interactive Codex exec and capture only the last message.
             codex exec --full-auto --color never -C "$PWD" --output-last-message "$output_file" "$prompt" >/dev/null
             cat "$output_file"
             rm -f "$output_file"
@@ -45,62 +57,101 @@ run_agent() {
     esac
 }
 
-# Функция проверки наличия pending задач
-has_pending_tasks() {
-    pending_count=$(grep -c '"status": "pending"' "$TASKS_FILE" 2>/dev/null || echo "0")
-    [ "$pending_count" -gt 0 ]
+count_status() {
+    local status="$1"
+    if [ -f "$TASKS_FILE" ]; then
+        # `|| true` чтобы grep с 0 совпадений не уронил `set -e`.
+        grep -c "\"status\": \"$status\"" "$TASKS_FILE" || true
+    else
+        echo "0"
+    fi
 }
 
 iteration=1
+prev_pending=-1
+stuck_count=0
 
-while has_pending_tasks; do
-    echo "Итерация $iteration"
+while :; do
+    pending=$(count_status "pending")
+    if [ "$pending" -eq 0 ]; then
+        break
+    fi
+    done_count=$(count_status "done")
+
+    echo "==================================="
+    echo "🚀 Итерация $iteration"
+    echo "==================================="
+    echo "📊 Статус: $pending ожидают, $done_count готово"
     echo "-----------------------------------"
 
-    # Показываем текущий статус задач
-    pending=$(grep -c '"status": "pending"' "$TASKS_FILE" 2>/dev/null || echo "0")
-    done_count=$(grep -c '"status": "done"' "$TASKS_FILE" 2>/dev/null || echo "0")
-    echo "Задач pending: $pending, done: $done_count"
-    echo "-----------------------------------"
+    # Anti-stuck: если pending не уменьшается несколько итераций подряд — выходим.
+    if [ "$pending" -eq "$prev_pending" ]; then
+        stuck_count=$((stuck_count + 1))
+        if [ "$stuck_count" -ge "$MAX_STUCK" ]; then
+            echo "⚠️  Прогресса нет $MAX_STUCK итераций подряд (pending=$pending). Останавливаю цикл."
+            speak "Хозяин, я застрял. Помоги."
+            exit 1
+        fi
+    else
+        stuck_count=0
+    fi
+    prev_pending=$pending
 
     agent=$(resolve_agent) || {
-        echo "Не найден поддерживаемый агент. Установите 'claude' или 'codex', либо задайте RALPH_AGENT." >&2
+        echo "❌ Не найден поддерживаемый агент. Установите 'claude' или 'codex', либо задайте RALPH_AGENT." >&2
         exit 1
     }
 
+    # Кавычки на EOF делают heredoc буквальным — никаких сюрпризов с $/`.
     prompt=$(cat <<'EOF'
 @tasks.json @progress.txt
-1. Найди фичу с наивысшим приоритетом и работай ТОЛЬКО над ней.
-Это должна быть фича, которую ТЫ считаешь наиболее приоритетной — не обязательно первая в списке.
-2. Проверь, что типы проходят через 'uv run ruff check .' и тесты через 'uv run pytest'.
-3. Обнови TASK с информацией о выполненной работе.
-4. Добавь свой прогресс в файл progress.txt.
-Используй это, чтобы оставить заметку для следующей итерации работы над кодом.
-5. Сделай git commit для этой фичи.
-РАБОТАЙ ТОЛЬКО НАД ОДНОЙ ФИЧЕЙ.
-Если при реализации фичи ты заметишь, что TASK полностью выполнен, выведи <promise>COMPLETE</promise>.
+Контекст: Next.js + TypeScript проект. Код приложения лежит в подпапке `beatyourself/`,
+а tasks.json и progress.txt — в корне репозитория.
+
+1. Прочитай progress.txt, чтобы понимать текущий контекст и формат записей.
+2. Найди ОДНУ фичу в tasks.json со статусом "pending" и наивысшим приоритетом
+   (critical > high > medium > low). Это должна быть фича, которую ТЫ считаешь
+   наиболее приоритетной — не обязательно первая в списке.
+3. Проверь зависимости: все задачи из массива `dependencies` текущей задачи должны
+   иметь статус "done". Если нет — выбери другую подходящую задачу.
+4. Реализуй фичу. Перед завершением обязательно прогони из подпапки beatyourself/:
+       cd beatyourself && npm run typecheck
+       cd beatyourself && npm run lint
+       cd beatyourself && npm test    # если в задаче или проекте есть тесты
+   Все применимые проверки должны пройти зелёными.
+5. Обнови tasks.json: поставь задаче статус "done" и кратко опиши результат
+   в поле `notes`.
+6. Допиши блок в конец progress.txt по формату, который уже используется в файле
+   (дата YYYY-MM-DD, ID задачи, что сделано, какие файлы тронуты).
+7. Сделай атомарный git commit для этой фичи.
+
+РАБОТАЙ ТОЛЬКО НАД ОДНОЙ ФИЧЕЙ. Не делай "попутный рефакторинг".
+Если задача полностью выполнена и все проверки прошли — выведи строго:
+<promise>COMPLETE</promise>
 EOF
 )
 
     result=$(run_agent "$agent" "$prompt")
-
     echo "$result"
 
     if [[ "$result" == *"<promise>COMPLETE</promise>"* ]]; then
-        echo "✓ TASK выполнен!"
-        # Проверяем, остались ли ещё pending задачи
-        remaining=$(grep -c '"status": "pending"' "$TASKS_FILE" 2>/dev/null || echo "0")
+        echo "✅ Задача успешно выполнена!"
+
+        remaining=$(count_status "pending")
         if [ "$remaining" -eq 0 ]; then
-            echo "🎉 Все задачи выполнены!"
-            say -v Milena "Хозяин, я всё сделалъ!"
+            echo "🎉 Все задачи из беклога завершены!"
+            speak "Хозяин, я всё сделал!"
             exit 0
         fi
-        echo "Осталось задач: $remaining. Продолжаю..."
-        say -v Milena "Задача готова. Продолжаю работу."
+
+        echo "Осталось задач: $remaining. Перехожу к следующей..."
+        speak "Задача готова. Продолжаю работу."
+    else
+        echo "⚠️  Агент не вернул тег завершения. Возможно, задача выполнена частично."
     fi
 
-    ((iteration++))
+    iteration=$((iteration + 1))
 done
 
-echo "Все задачи выполнены! Итераций: $((iteration-1))"
-say -v Milena "Хозяин, я сделалъ!"
+echo "🎉 Все задачи выполнены! Всего итераций: $((iteration - 1))"
+speak "Хозяин, я всё сделал!"
