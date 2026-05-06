@@ -3300,3 +3300,97 @@ PRE-EXISTING UNSTAGED (NOT touched, hands-off):
   beatyourself/app/(app)/profile/page.tsx (TASK-009 placeholder)
   beatyourself/components/features/ChallengeForm.tsx
     (TASK-014 in-progress, broken types — not mine)
+
+## 2026-05-06 — TASK-014: /challenges/new form
+
+Status: done
+
+What was already in place when I started:
+- beatyourself/components/features/ChallengeForm.tsx (untracked; partial scaffold from a
+  prior iteration). All field UI (title, description, type, metric, targetValue, unit,
+  difficulty, startDate, endDate, color, icon) and the live PreviewCard were present.
+- Failed `npm run typecheck` with 12 errors, all from a single root cause:
+  `zodResolver(createChallengeSchema)` returns
+  `Resolver<z.input<schema>, ctx, z.output<schema>>`. With `z.coerce.date()` on
+  startDate/endDate, input ≠ output, so the default `useForm<FormValues>` (which sets
+  TFieldValues=TTransformedValues=FormValues) is incompatible with the resolver's
+  three-generic shape.
+- App route /challenges/new did NOT exist — Glob on app/(app)/challenges/new/**
+  returned nothing. The /challenges list page already linked to /challenges/new via three
+  <Link> spots (header CTA + empty state + empty tab), so the route was a missing piece.
+
+What I changed in this iteration:
+- components/features/ChallengeForm.tsx
+    * Added a single `as unknown as Resolver<FormValues>` cast on the zodResolver call.
+      Runtime unchanged; TS is told the resolver matches FormValues.
+    * Removed unused `DEFAULT_UNIT_BY_METRIC` constant (a dead leftover).
+    * Added a useEffect that re-runs `form.trigger("endDate")` when watchedStartDate
+      changes if endDate has been touched, so the cross-field refine error surfaces
+      immediately when the user edits startDate after touching endDate.
+- app/(app)/challenges/new/page.tsx (new file)
+    * Server component (no "use client"). Renders header (back-link to /challenges with
+      ChevronLeft icon, h1 "Новый челлендж", subtitle) + <ChallengeForm/>.
+    * Auth gate inherited from app/(app)/layout.tsx (TASK-008 cascade); no
+      requireSession() needed at the page level.
+
+Test_steps coverage (per PRD acceptance):
+1. Valid form submit → router.push(`/challenges/${id}`) after success toast.
+   (Detail page lands in TASK-032; until then, the redirect lands on a 404 — acceptable
+   per TASK-014 criterion 4 "редирект на /challenges/[id] или /challenges".)
+2. Empty title → handleSubmit re-validates via zodResolver before invoking onSubmit;
+   FormMessage under title shows "Title is required".
+3. metric=distance_km → unit auto-fill "км" via the watchedMetric useEffect that calls
+   form.setValue("unit", METRIC_OPTIONS["distance_km"].defaultUnit).
+4. endDate < startDate → schema .refine path=["endDate"] sets the error on the endDate
+   field; FormMessage renders the message.
+
+Verification (all green):
+- npm run typecheck            -> exit 0 (down from 12 errors)
+- npm run lint                 -> 0 errors, 1 warning (React Compiler false-positive on
+                                  react-hook-form's .watch() — known incompatibility,
+                                  same warning was on the pre-existing scaffold)
+- npm test                     -> 44/44 unaffected (10 cipher + 16 streaks + 18 progress)
+- npm run format:check         -> clean after one `prettier --write` pass on
+                                  ChallengeForm.tsx (class ordering only)
+- npm run build                -> ✓ Compiled in 1728ms (shell-overridden env vars).
+                                  Route map adds: ƒ /challenges/new (dynamic).
+
+## Notes for next iterations
+
+- TASK-015 (challenges/[id]/edit) can reuse most of ChallengeForm with editable fields
+  restricted to description/endDate/color/icon/status. Two implementation options:
+  (a) extract a shared ChallengeFormShell + an editable-fields prop, or
+  (b) add a `mode: 'create' | 'edit'` prop and disable the immutable inputs in edit mode.
+  Either preserves the live preview card + the cross-field refine validation pattern.
+
+- The router.push("/challenges/{id}") in onSubmit points to the TASK-032 detail page
+  which doesn't exist yet. If TASK-032 is delayed, swap the redirect target to
+  "/challenges" so users land on the list (still satisfies criterion 4).
+
+- React Compiler 16 + react-hook-form: `form.watch(name)` returns a function the compiler
+  cannot memoize safely. Suppressing with eslint-disable would be premature noise; warning
+  is harmless. If it ever blocks CI, narrow the suppression to the specific lines.
+
+- The form holds Date objects in state (date Controllers convert string⇄Date inline).
+  createChallengeSchema's z.coerce.date() preserves robustness for non-form callers
+  (e.g., scripts) — keep it as-is, don't tighten to z.date().
+
+## Files touched this iteration
+
+NEW (staged for TASK-014 commit):
+  beatyourself/app/(app)/challenges/new/page.tsx
+
+MODIFIED (staged for TASK-014 commit):
+  beatyourself/components/features/ChallengeForm.tsx
+    (was untracked from prior iteration; finishing it here so the file enters git
+    history together with the route page that consumes it — single atomic commit)
+  tasks.json (TASK-014 status: pending → done + notes)
+  progress.txt (this block)
+
+PRE-EXISTING UNSTAGED (NOT touched, hands-off — same hands-off list as TASK-023):
+  README.md (deleted, untracked-state)
+  beatyourself/app/(app)/layout.tsx (TASK-009 mod)
+  beatyourself/components/layout/{BottomNav,Sidebar,nav-items}.{tsx,ts} (TASK-009)
+  beatyourself/app/(app)/{water,weight,profile}/page.tsx (TASK-009 placeholders)
+  ralph.sh
+
