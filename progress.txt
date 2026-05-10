@@ -3394,3 +3394,108 @@ PRE-EXISTING UNSTAGED (NOT touched, hands-off — same hands-off list as TASK-02
   beatyourself/app/(app)/{water,weight,profile}/page.tsx (TASK-009 placeholders)
   ralph.sh
 
+## 2026-05-10 — TASK-025: dashboard quick-add activity
+
+Status: done
+
+Why this task: highest-priority pending task with all dependencies (TASK-018 ActivityForm,
+TASK-023 StreakBlock) already done. Spec calls for a "Большая кнопка '+ Добавить активность'
+под streak (mobile-first, в зоне доступа большого пальца)" that opens the existing
+ActivityForm modal and revalidates the dashboard on save.
+
+What I changed:
+- beatyourself/app/(app)/dashboard/page.tsx
+    Inserted a third child between <StreakBlock/> and <ActiveChallengesList/>:
+    <ActivityForm
+      trigger={
+        <Button size="lg" className="w-full text-base">
+          <Plus className="size-5" aria-hidden />
+          Добавить активность
+        </Button>
+      }
+    />
+    Full-width Button (size=lg, w-full) keeps thumb reach on mobile and stretches
+    gracefully on desktop. ActivityForm (TASK-018) already handles the responsive
+    Sheet (mobile) vs. Dialog (desktop) split internally — no new modal logic here.
+    Trigger uses lucide Plus icon, matches the iconography elsewhere in the app.
+
+- beatyourself/app/(app)/layout.tsx
+    Mounted <Toaster/> (from components/ui/sonner.tsx) as a sibling of {children}.
+    This is the prereq deferred from TASK-002/TASK-007/TASK-018 progress notes
+    ("the Toaster from components/ui/sonner.tsx should be mounted in the (app) layout").
+    Placed in the (app) layout (NOT root) so /login stays minimal. Without this mount
+    the toast.success/error calls in ActivityFormFields would be no-ops, defeating
+    the visual confirmation half of test_step 2.
+
+Why no extra plumbing for "streak increments / challenges progress updates":
+- createActivityAction (actions/activities.ts:22-25) already calls
+  revalidatePath('/dashboard') + revalidatePath('/challenges') after a successful
+  create.
+- Next 16's revalidatePath invalidates the route's cached render, so on the next
+  navigation/re-render the DashboardPage server component runs getDashboardData()
+  fresh, which re-invokes calculateStreak (TASK-021) over the new activity row.
+- createActivity in lib/services/activities.ts also calls
+  recalculateChallengeProgress (TASK-019), which updates Challenge.currentValue —
+  ActiveChallengesList re-renders with the new value.
+- Net: no dashboard-page changes needed beyond inserting the trigger button.
+
+Test_steps coverage (per PRD acceptance):
+1. Click the button → form opens.
+   ActivityForm wraps trigger in SheetTrigger asChild (mobile) / DialogTrigger asChild
+   (desktop) — existing TASK-018 wiring. Click sets open=true.
+2. Save → form closes, streak increments if was inactive, challenge progress updates.
+   onSubmit awaits createActivityAction → on success calls onSuccess →
+   handleSuccess sets open=false (TASK-018). revalidatePath('/dashboard') is in
+   actions/activities.ts. Next render hits getDashboardData() fresh → streak +
+   challenges reflect the new row.
+
+Verification (all green from beatyourself/):
+- npm run typecheck            -> exit 0
+- npm run lint                 -> 0 errors, 2 warnings (both pre-existing React
+                                  Compiler / react-hook-form .watch() incompat
+                                  in ActivityForm.tsx + ChallengeForm.tsx —
+                                  flagged in TASK-014/018 notes, not introduced
+                                  here)
+- npm test                     -> 44/44 (10 cipher + 16 streaks + 18 progress
+                                  unaffected; per architectural_principles
+                                  "CRUD не покрываем unit-тестами" + spec has no
+                                  test_steps requiring unit tests, no new tests)
+- npm run format:check         -> All matched files use Prettier code style!
+
+HARNESS LIMITATION (consistent with prior UI iterations TASK-002/007/008/009/013/
+014/018/023/024): cannot verify the 2 PRD test_steps end-to-end visually from this
+harness — they require a real authed session + a browser. Code-review proxies are
+documented above. The user must run npm run dev and exercise the dashboard against
+a populated DB to fully sign off.
+
+## Notes for next iterations
+
+- The Toaster is now mounted globally in (app)/* — TASK-028/030/036 etc. that need
+  toast feedback can call toast() directly without per-page mounts.
+- TASK-026 (heatmap) lands in the same dashboard <main className="space-y-6"> shell
+  below ActiveChallengesList. The existing revalidatePath('/dashboard') in
+  createActivityAction will refresh heatmap counts automatically when a new activity
+  is added.
+- If the quick-add UX evolves to a floating-action-button on mobile, swap the
+  inline Button child for an FAB component — ActivityForm.trigger takes any
+  ReactNode, so no API change is needed.
+- Pluralization helper pluralizeDays still duplicated across StreakBlock /
+  ChallengeCard / ActiveChallengesList — extraction trigger is a fourth callsite
+  (likely TASK-031 profile statistics with a different stem word; that's the right
+  time to introduce a generic pluralizeRu(n, [one, few, many]) helper).
+
+## Files touched this iteration
+
+MODIFIED (staged for TASK-025 commit):
+  beatyourself/app/(app)/dashboard/page.tsx (ActivityForm trigger inserted)
+  beatyourself/app/(app)/layout.tsx (Toaster mount added)
+  tasks.json (TASK-025 status: pending → done + notes)
+  progress.txt (this block)
+
+PRE-EXISTING UNSTAGED (NOT touched, hands-off — same hands-off list as TASK-014/023):
+  README.md (deleted, untracked-state)
+  beatyourself/components/layout/{BottomNav,Sidebar,nav-items}.{tsx,ts} (TASK-009)
+  beatyourself/app/(app)/{water,weight,profile}/page.tsx (TASK-009 placeholders)
+  beatyourself/components/features/{ActiveChallengesList,ActivityForm,ChallengeForm}.tsx
+    (TASK-014/018/024 — already in working tree from prior iterations)
+
