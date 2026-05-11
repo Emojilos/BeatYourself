@@ -3499,3 +3499,121 @@ PRE-EXISTING UNSTAGED (NOT touched, hands-off — same hands-off list as TASK-01
   beatyourself/components/features/{ActiveChallengesList,ActivityForm,ChallengeForm}.tsx
     (TASK-014/018/024 — already in working tree from prior iterations)
 
+## 2026-05-11 — TASK-015: edit & delete challenge page
+
+Status: done
+
+Why this task: highest-priority pending task with all dependencies (TASK-014
+ChallengeForm) already done. Spec calls for /challenges/[id]/edit allowing
+description/endDate/color/icon/status edits with read-only display of metric/
+targetValue/type/startDate, plus a delete button with confirmation dialog. This
+completes the CRUD-UI loop for challenges (create → list → edit → delete).
+
+What I added (NEW files):
+- beatyourself/app/(app)/challenges/[id]/edit/page.tsx
+    Server component. requireSession() → await params (Next 16 typed dynamic
+    params Promise<{id}>) → getChallenge(userId, id) IDOR-scoped via
+    lib/services/challenges.ts:35 → notFound() on null → renders the form.
+    Layout shell mirrors challenges/new: container + back link to
+    /challenges/{id} + h1 + subtitle + form.
+- beatyourself/components/features/EditChallengeForm.tsx
+    Client component, react-hook-form + zodResolver(updateChallengeSchema).
+    Two cards: read-only "Параметры челленджа" (title/type/metric/target+unit/
+    startDate/difficulty badge) and editable "Что можно изменить" (description
+    textarea, endDate, color picker, icon picker, status). Status options
+    limited to active+archived per spec "можно архивировать"; completed/failed
+    are server-side terminal states (TASK-019/020) and intentionally NOT
+    user-selectable. If challenge.status is already terminal the buttons
+    render disabled with a hint. Save button → updateChallengeAction → toast +
+    router.push(`/challenges/${id}`). Delete button (variant=destructive) →
+    shadcn Dialog confirmation → deleteChallengeAction → toast + router.push
+    ('/challenges'). Pending/deleting flags mutually disable buttons to
+    prevent double-submit. Inline endDate<startDate guard runs client-side via
+    form.setError before the round-trip (the service throws too — both layers
+    enforce it). Description trim + color/icon ?? undefined coercion match
+    optional-field semantics.
+
+What I modified: nothing in src — both files are new.
+
+Why no test file:
+- architectural_principles: "Тесты пишем ТОЛЬКО для streak calculation и
+  token crypto. CRUD не покрываем unit-тестами"
+- TASK-015 spec has no test_steps that demand unit tests
+
+Test_steps coverage (per PRD acceptance):
+1. "Открыть страницу — поля заполнены текущими значениями"
+   defaultValues spreads challenge.{description, endDate, color, icon,
+   status}; description coerces null→"" for the textarea; color/icon coerce
+   null→undefined since the pickers represent "no value" with undefined.
+2. "Изменить description, submit — изменения сохранены"
+   handleSubmit awaits updateChallengeAction; on success router.refresh()
+   invalidates the cache so the next read reflects the new value.
+3. "Попытаться через DevTools отправить targetValue в action — отклоняется
+   zod-схемой"
+   updateChallengeSchema is a fresh z.object (NOT .partial() of create) and
+   declares only description/endDate/color/icon/status — zod strips unknown
+   keys on parse. Verified end-to-end in TASK-012's smoke (case 4).
+4. "Удалить челлендж — подтверждение → удаление → редирект на /challenges"
+   destructive button opens shadcn Dialog (Radix focus trap + ESC-to-close);
+   confirm calls deleteChallengeAction(id) → service findFirst-then-delete
+   IDOR-scoped (lib/services/challenges.ts:84) → router.push('/challenges') +
+   router.refresh().
+
+Verification (all green from beatyourself/):
+- npm run typecheck            -> exit 0
+- npm run lint                 -> 0 errors, 2 pre-existing warnings (React
+                                  Compiler / react-hook-form .watch() incompat
+                                  in ActivityForm.tsx + ChallengeForm.tsx —
+                                  flagged in TASK-014/018/025 notes; NOT
+                                  introduced by EditChallengeForm.tsx, which
+                                  doesn't use form.watch)
+- npm test                     -> 44/44 (10 cipher + 16 streaks + 18 progress)
+- npm run format:check         -> All matched files use Prettier code style!
+- npm run build                -> ✓ Compiled successfully in 2.1s; route
+                                  ƒ /challenges/[id]/edit registered alongside
+                                  ƒ /challenges + ƒ /challenges/new
+
+HARNESS LIMITATION (consistent with prior UI iterations TASK-002/007/008/009/
+013/014/018/023/024/025): cannot verify the 4 PRD test_steps end-to-end
+visually from this harness — they require a real authed session + seeded DB.
+Code-review proxies are documented above. The user must run npm run dev and
+exercise /challenges/{id}/edit against a populated DB to fully sign off.
+
+## Notes for next iterations
+
+- TASK-032 will land /challenges/[id] (detail page) — both the cancel button
+  and the post-update redirect target this route. Until TASK-032 ships the
+  user lands on a 404 after save (acceptable per acceptance criterion 4
+  "При успехе редирект на /challenges/[id]"). TASK-032's "Редактировать"
+  button should link back here at /challenges/[id]/edit.
+- ChallengeForm.tsx + EditChallengeForm.tsx now duplicate ~7 field constants
+  (COLOR_PRESETS, ICON_PRESETS, DIFFICULTY_LABEL/CLASSNAME, METRIC_LABEL,
+  TYPE_LABEL, formatNumber, dateInputValue, formatRussianDate). Per
+  architectural_principles "no premature abstraction" the duplication stays;
+  third callsite (e.g., TASK-032 detail page wanting the same color/icon
+  palette for consistent rendering, or a future template gallery) is the
+  right time to extract into lib/forms/challenge-presets.ts.
+- Status terminal-state handling: the disabled-buttons pattern works for now,
+  but if a future UX wants "restart this challenge" (move completed/failed
+  back to active for a new period), that's a separate workflow (re-create vs
+  update) and belongs in TASK-032 detail-page actions.
+
+## Files touched this iteration
+
+NEW (staged for TASK-015 commit):
+  beatyourself/app/(app)/challenges/[id]/edit/page.tsx
+  beatyourself/components/features/EditChallengeForm.tsx
+
+MODIFIED (staged for TASK-015 commit):
+  tasks.json (TASK-015 status: pending → done + notes)
+  progress.txt (this block)
+
+PRE-EXISTING UNSTAGED (NOT touched, hands-off — same hands-off list as
+TASK-014/023/025):
+  README.md (deleted, untracked-state)
+  beatyourself/app/(app)/{water,weight,profile}/page.tsx (TASK-009 placeholders)
+  beatyourself/components/layout/{BottomNav,Sidebar,nav-items}.{tsx,ts}
+    (TASK-009)
+  beatyourself/components/features/{ActiveChallengesList,ActivityForm}.tsx
+    (TASK-018/024 — already in working tree from prior iterations)
+  ralph.sh
