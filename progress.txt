@@ -3617,3 +3617,187 @@ TASK-014/023/025):
   beatyourself/components/features/{ActiveChallengesList,ActivityForm}.tsx
     (TASK-018/024 — already in working tree from prior iterations)
   ralph.sh
+
+## 2026-05-12 — TASK-031: profile page with stats, archive, sign-out
+
+Status: done
+
+Why this task: highest-priority pending task with all dependencies (TASK-019
+challenge-progress, TASK-021 streaks, TASK-008 auth shell) already done.
+Strategic value: TASK-031 unblocks the entire Strava integration chain
+(TASK-033 → 034 → 035 → 036) and TASK-040 (deploy doc), since all four of
+those have TASK-031 in their dependency closure. Among the two medium-
+priority pending tasks (TASK-030 weight page + TASK-031 profile), TASK-031
+has the larger downstream unblock surface, so I picked it over TASK-030.
+
+What I added (NEW files):
+- beatyourself/lib/services/profile.ts
+    Server-only aggregator. getProfileData(userId, filter, options) runs 5
+    queries in a single Promise.all: user fields (name/email/avatarUrl),
+    activity aggregate (_count._all + _sum.distanceKm/durationMin/steps),
+    narrow activityDate-only findMany for calculateStreak, completed+failed
+    challenges ordered [completedAt desc, endDate desc, createdAt desc], and
+    a Strava-integration existence check (select:{userId:true}). Returns
+    user/stats/completed/failed/availableYears/stravaConnected. Year filter
+    derived from completedAt || endDate UTC year; difficulty filter applied
+    in-memory. Exports challengeArchiveYear helper.
+- beatyourself/actions/profile.ts
+    'use server' module exporting signOutAction → next-auth signOut({
+    redirectTo:'/login' }). Throws NEXT_REDIRECT which the <form action>
+    runtime catches and turns into a 307.
+- beatyourself/components/features/ProfileSignOutButton.tsx
+    Client form with useFormStatus for the pending state (button label
+    flips 'Выйти'/'Выходим…' and disables during submission). lucide
+    LogOut icon. Wraps signOutAction via <form action=...>.
+- beatyourself/components/features/ProfileArchive.tsx
+    Client component. shadcn Tabs Завершённые/Проваленные with counts.
+    Native <select>s for year + difficulty filters that push to URL via
+    router.push({scroll:false}) — filter state is shareable + back-button-
+    friendly. Reset link clears all params. CompletedChallengeCard shows
+    an Award badge with бронза/серебро/золото by difficulty: easy→orange
+    tint→Бронза, medium→slate tint→Серебро, hard→yellow tint→Золото. Plus
+    current value, completion date, and difficulty label.
+    FailedChallengeCard shows 'Не выполнен' red badge + percent progress
+    bar (currentValue/targetValue capped at 100%) + 'Срок истёк <endDate>'.
+- beatyourself/app/(app)/profile/page.tsx (replaces TASK-009 placeholder)
+    Async server component. Awaits Next 16 typed searchParams Promise<{
+    year?,difficulty? }>; parses year as parseInt + isFinite guard, and
+    difficulty against the Difficulty enum set. requireSession() →
+    getProfileData(session.user.id, filter). Renders header (avatar img
+    with referrerPolicy='no-referrer' for Google CDN avatars + single-
+    letter fallback in a muted-bg circle, name, email), StatsBlock (6
+    cards: Activity for total count, Map for distance km, Footprints for
+    steps, Timer for hours, Award for current+longest streak —
+    Intl.NumberFormat('ru-RU') for thousands grouping; minutes/60→hours;
+    Russian day pluralization), ProfileArchive, then a bottom action row
+    with Strava connect link (to /api/strava/connect, route lands in
+    TASK-033) or 'Strava подключён' status text if integration exists,
+    plus ProfileSignOutButton.
+
+What I modified: nothing in src — all changes are new files plus the
+page.tsx overwrite of the TASK-009 placeholder.
+
+Design choices worth flagging:
+1. signOut via server action + <form action=signOutAction> + useFormStatus
+   is the canonical NextAuth v5 pattern — signOut throws NEXT_REDIRECT
+   which the form-action runtime catches and returns the redirect to the
+   browser; the action does not return JSON.
+2. Filter URL params (year/difficulty) live in the URL so navigation is
+   shareable and the back button restores state; tab state (completed/
+   failed) is local client state because there's no use-case for a shared
+   link to 'profile with failed tab selected'.
+3. Years derived from challenge data, not session — only years where the
+   user has archived challenges appear in the dropdown. Sorted descending
+   so the most recent year is first.
+4. Strava connection check uses select:{userId:true} for an existence-only
+   query — no token decryption needed at the service boundary; the
+   disconnect button is intentionally deferred to TASK-036 since
+   disconnectStravaAction lands in TASK-033. Today's UI shows either the
+   connect link or a passive 'Strava подключён' badge.
+5. Avatar uses plain <img> with eslint-disable-next-line for @next/next/
+   no-img-element — using next/image would require remotePatterns config
+   for googleusercontent.com which is out of scope for TASK-031.
+6. DateTime.toLocaleDateString('ru-RU') for localized dates matches the
+   convention from ChallengeCard.tsx (TASK-013) and EditChallengeForm.tsx
+   (TASK-015).
+
+Why no test file:
+- architectural_principles: "Тесты пишем ТОЛЬКО для streak calculation и
+  token crypto. CRUD не покрываем unit-тестами"
+- TASK-031 spec has no test_steps demanding unit tests; the streak math
+  this page consumes is already covered by 16 tests in
+  lib/services/streaks.test.ts.
+
+Test_steps coverage (per PRD acceptance):
+1. "Открыть /profile — отображаются аватар и имя из Google"
+   Header reads data.user.avatarUrl + data.user.name, both synced on
+   every signIn callback (lib/auth/config.ts:48-63). Fallback chain:
+   data.user.name → session.user.name → data.user.email → '?'.
+2. "Статистика корректна (сравнить с raw query)"
+   prisma.activity.aggregate _count._all and _sum returns are the
+   canonical Prisma sums, equivalent to SELECT COUNT(*), SUM(distance_km),
+   SUM(duration_min), SUM(steps) FROM activities WHERE user_id=?
+   — same correctness as the raw SQL with userId scoping; null _sum
+   coerced to 0.
+3. "Завершить челлендж → отображается во вкладке Завершённые"
+   prisma.challenge.findMany where status: { in: ['completed','failed'] }
+   includes both; the in-memory .filter(c => c.status === 'completed')
+   splits the bucket; ordering [completedAt desc, endDate desc, createdAt
+   desc] surfaces most-recent completions first.
+4. "Просрочить челлендж → во вкладке Проваленные с %"
+   FailedChallengeCard renders the progress bar at Math.min(100, round(
+   currentValue/targetValue*100)) + 'Срок истёк <endDate>'. The cron from
+   TASK-020 is what flips status='active' → 'failed' when endDate <
+   CURRENT_DATE && currentValue < targetValue, so the data this UI
+   consumes is already correctly populated.
+5. "Кнопка 'Выйти' — signOut, редирект на /login"
+   <form action={signOutAction}> invokes the 'use server' module;
+   signOut({redirectTo:'/login'}) clears the JWT session cookie and
+   throws NEXT_REDIRECT to /login. Any subsequent request without a
+   session redirects via requireSession() → /login (TASK-008 cascade).
+
+Verification (all green from beatyourself/):
+- npm run typecheck            -> exit 0
+- npm run lint                 -> 0 errors, 2 pre-existing warnings (React
+                                  Compiler / react-hook-form .watch()
+                                  incompat in ActivityForm.tsx +
+                                  ChallengeForm.tsx — flagged in TASK-014/
+                                  018/023/024/025 notes; NOT introduced by
+                                  TASK-031)
+- npm test                     -> 44/44 (10 cipher + 16 streaks + 18
+                                  progress)
+- npm run format:check         -> All matched files use Prettier code
+                                  style! (one prettier --write pass on
+                                  page.tsx for line-wrap on a long h1
+                                  className)
+- npm run build                -> ✓ Compiled successfully in 2.0s with
+                                  shell-overridden env vars (placeholder
+                                  DATABASE_URL/NEXTAUTH_*/GOOGLE_* to
+                                  bypass the known TASK-003 .env.local
+                                  NEXTAUTH_URL typo); route ƒ /profile
+                                  registered as dynamic — server-rendered
+                                  on demand per requireSession +
+                                  searchParams.Promise.
+
+HARNESS LIMITATION (consistent with prior UI iterations TASK-002/007/008/
+009/013/014/015/018/023/024/025): cannot verify the 5 PRD test_steps end-
+to-end visually from this harness — they require a real authed Google
+session + seeded DB + browser viewport. Code-review proxies are
+documented above. The user must run npm run dev, sign in with a Google
+whitelist email, seed a few challenges + activities, and exercise
+/profile to fully sign off.
+
+## Notes for next iterations
+
+- TASK-033/036 (Strava OAuth + UI) will replace the placeholder Strava
+  connect link with a real /api/strava/connect endpoint and a disconnect
+  button. The existing 'Strava подключён' branch is the placement target
+  for the lastSyncAt + 'Синхронизировать сейчас' + 'Отключить' controls
+  from TASK-036.
+- TASK-038 (empty states) should consolidate this page's
+  EmptyArchiveState into the shared components/ui/EmptyState.tsx
+  primitive — current copy 'Завершённых челленджей пока нет.' /
+  'Проваленных челленджей нет.' remains a CTA-less variant.
+- When a user-tz is added to UserSettings, pass it to getProfileData(
+  userId, filter, {userTz}) so streak day-bucketing uses the user's
+  locale; for now DEFAULT_USER_TZ='Europe/Moscow' from streaks.ts is the
+  single source of truth.
+- pluralizeDays now lives in 4 callsites (ChallengeCard + StreakBlock +
+  ActiveChallengesList + page.tsx StatsBlock) — extraction to
+  lib/utils/text-plural.ts is justified per the architectural 'three
+  callsites' threshold, but deferred per the current task instruction
+  "не делай попутный рефакторинг". Extract as a standalone refactor task
+  before a fifth callsite lands.
+
+## Files touched this iteration
+
+NEW (staged for TASK-031 commit):
+  beatyourself/lib/services/profile.ts
+  beatyourself/actions/profile.ts
+  beatyourself/components/features/ProfileSignOutButton.tsx
+  beatyourself/components/features/ProfileArchive.tsx
+
+MODIFIED (staged for TASK-031 commit):
+  beatyourself/app/(app)/profile/page.tsx (replaces TASK-009 placeholder)
+  tasks.json (TASK-031 status: pending → done + notes)
+  progress.txt (this block)
