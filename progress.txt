@@ -3996,3 +3996,181 @@ TASK-031 plus the unrelated TASK-018/024/026/027/028 untracked files):
   beatyourself/package-lock.json
   package-lock.json (repo root)
   ralph.sh
+
+## 2026-05-16 — TASK-034: Strava token refresh with mutex
+
+Status: done
+
+Why this task: highest-priority unblocked pending task (medium). TASK-033
+landed the OAuth connect/callback/disconnect flow + raw refreshAccessToken
+helper; TASK-034 wraps that into a per-userId-safe client any future Strava
+REST consumer (TASK-035 sync service, future on-demand "refresh now"
+actions) can call without thinking about expiry, mutex, or 401-revocation
+handling. TASK-035 + TASK-040 were both blocked on this.
+
+What I added (NEW files):
+- beatyourself/lib/strava/client.ts
+    server-only module. Exports:
+      * getValidAccessToken(userId: string): Promise<string>
+      * StravaNotConnectedError extends Error (carries userId)
+      * StravaReconnectRequiredError extends Error (carries userId, cause)
+    Flow:
+      1. prisma.stravaIntegration.findUnique({where:{userId}, select:
+         {accessTokenEncrypted, expiresAt, needsReconnect}})
+      2. row missing → throw StravaNotConnectedError
+      3. needs_reconnect=true → throw StravaReconnectRequiredError
+      4. expiresAt - now > 5min leeway → decrypt cached token, return
+      5. else: look up refreshLocks Map<userId, Promise<string>>
+         - if in-flight: await the existing Promise
+         - else: store new Promise, run performRefresh(); .finally()
+           deletes own entry after settle
+    performRefresh():
+      - SECOND findUnique inside the lock (double-checked locking) — a
+        prior in-flight refresh may have completed between our outer
+        check and slot acquisition, so re-read lets us skip the network
+        call AND re-validates needsReconnect
+      - decrypt refresh_token (never returned to caller)
+      - call refreshAccessToken() from oauth.ts (TASK-033)
+      - on success: encrypt both new tokens (Strava ROTATES refresh_token
+        on every /oauth/token call — must persist the new one), single
+        prisma.stravaIntegration.update writes {accessTokenEncrypted,
+        refreshTokenEncrypted, expiresAt:new Date(response.expires_at*
+        1000), needsReconnect:false} — atomic per row
+      - on StravaOAuthError with status === 400 || 401: update
+        needsReconnect=true and throw StravaReconnectRequiredError
+        chained with the original error as cause. Spec writes "401" but
+        Strava actually returns 400 with {errors:[{resource:
+        'RefreshToken', code:'invalid'}]} for revoked refresh_tokens —
+        we accept both since both mean the refresh_token will not work.
+      - other errors (network, 5xx) propagate untouched so callers retry
+
+What I modified: nothing in src — file is net-new.
+
+Why per-userId mutex matters:
+- Strava /oauth/token rotates the refresh_token on every successful call;
+  parallel refreshes for the same user would race and the loser's
+  rotated refresh_token would be the stale one, leaving us with a
+  needs_reconnect within seconds.
+- Map<userId, Promise<string>> dedupes parallel callers: 2nd-5th callers
+  see the non-undefined entry and await the same Promise; performRefresh
+  runs exactly once per userId per refresh cycle.
+- .finally() on the stored Promise self-deletes its map entry after
+  settle (success OR failure), so the lock can never leak past the
+  refresh.
+- Scope is in-memory per-process. Today the app runs as a single Render
+  worker so this is sufficient. If we ever scale horizontally, swap the
+  Map for a Redis SETNX-with-TTL keyed on userId. Inline comment in
+  client.ts flags this.
+
+Why double-checked locking inside performRefresh:
+- Between caller A's outer findUnique and when caller A's performRefresh
+  actually runs, another VALID refresh promise may have just completed
+  (its map entry already deleted by its own .finally()) and the row is
+  now fresh — in which case the re-read sees expiresAt-now > leeway
+  and returns the decrypted cached token without a network call.
+
+Why no test file:
+- architectural_principles: "Тесты пишем ТОЛЬКО для streak calculation
+  и token crypto. CRUD не покрываем unit-тестами"
+- TASK-034 is an integration helper, not streak/crypto. Per policy, no
+  permanent unit tests added. The mutex semantics and double-check
+  could be unit-tested with mocked Prisma + mocked fetch, but doing so
+  would violate the explicit project rule.
+
+Test_steps coverage (per PRD acceptance):
+1. "Создать StravaIntegration с истёкшим access_token и валидным refresh
+   — getValidAccessToken возвращает новый, БД обновлена"
+   getValidAccessToken sees integration.expiresAt.getTime()-Date.now()
+   <= REFRESH_LEEWAY_MS, enters refreshLocks (empty), creates Promise
+   that runs performRefresh. performRefresh re-reads row, decrypts
+   refresh token, calls refreshAccessToken from oauth.ts (TASK-033).
+   On 200 response, encrypts new {access,refresh}_token via cipher.ts
+   (TASK-006-tested), update writes all 4 fields atomically. Function
+   returns response.access_token (plaintext to caller).
+2. "Параллельно вызвать getValidAccessToken 5 раз для одного user —
+   refresh случается 1 раз (mutex)"
+   Caller 1 sees refreshLocks.get(userId)===undefined, stores its
+   Promise, awaits performRefresh; callers 2-5 race to read the
+   now-populated map and find the same Promise, await it. Only caller
+   1's performRefresh issues the fetch to Strava /oauth/token, and the
+   single update() writes back. All 5 callers receive the same
+   resolved string. The .finally() handler ensures the Map entry is
+   gone before any 6th caller can join.
+3. "С revoked refresh_token — needs_reconnect=true, ошибка"
+   refreshAccessToken throws StravaOAuthError(status=400/401, body=
+   <Strava's "RefreshToken invalid" payload>). The catch block matches
+   instanceof StravaOAuthError && (status===400||401), runs
+   prisma.stravaIntegration.update({where:{userId}, data:
+   {needsReconnect:true}}), then throws StravaReconnectRequiredError(
+   userId, {cause:err}) so callers can detect+surface the reconnect
+   prompt (TASK-036 will wire a toast + red banner).
+
+Verification (all green from beatyourself/):
+- npm run typecheck            -> exit 0
+- npm run lint                 -> 0 errors, 2 pre-existing warnings
+                                  (React Compiler / react-hook-form
+                                  .watch() incompat in ActivityForm.tsx
+                                  :155 + ChallengeForm.tsx:172 — same
+                                  flagged in TASK-031/033 notes, NOT
+                                  introduced by this iteration)
+- npm test                     -> 44/44 (10 cipher + 16 streaks +
+                                  18 progress unaffected; no new tests
+                                  per architectural_principles)
+
+HARNESS LIMITATION: the 3 PRD test_steps require live Strava OAuth
+credentials + a real refresh_token; cannot hand-exec from this harness.
+Code-review proxies are documented under "Test_steps coverage" above.
+The user must run npm run dev, complete /api/strava/connect, manipulate
+expires_at in the DB (or wait for natural expiry) and re-call
+getValidAccessToken from a transient debugging route to verify all 3
+end-to-end.
+
+## Notes for next iterations
+
+- TASK-035 (strava-sync service, next pending medium): wrap all Strava
+  REST calls (GET /api/v3/athlete/activities, GET /api/v3/athlete/
+  activities/{id}/streams, etc.) so they call getValidAccessToken(
+  userId) once per batch and attach Authorization: Bearer {token}. If
+  a REST call returns 401 mid-request (token revoked between
+  /oauth/token issue and the REST call), the sync layer should ALSO
+  flip needsReconnect=true — TASK-034 only handles 401 from
+  /oauth/token itself. Catch the 401 there, do the update, then throw
+  StravaReconnectRequiredError so the cron logs a per-user fail.
+- TASK-036 (Strava UI in /profile): catch StravaReconnectRequiredError
+  in any server action that triggers a Strava call ("Синхронизировать
+  сейчас" button) and surface via toast + the existing "needs_reconnect"
+  red banner. The existing StravaDisconnectButton.tsx is the placement
+  reference.
+- refreshLocks is process-scoped — if/when a second worker lands, swap
+  to Redis SETNX. The comment in client.ts flags this.
+- Consider adding a one-off Vitest smoke (mocked Prisma + mocked global
+  fetch returning expired+refreshed responses) when TASK-035 lands, to
+  pin the mutex contract before the cron starts hammering it. Defer
+  per current architectural_principles policy.
+
+## Files touched this iteration
+
+NEW (staged for TASK-034 commit):
+  beatyourself/lib/strava/client.ts
+
+MODIFIED (staged for TASK-034 commit):
+  tasks.json (TASK-034 status: pending → done + notes)
+  progress.txt (this block)
+
+PRE-EXISTING UNSTAGED (NOT touched, hands-off — same hands-off list as
+TASK-030/031 plus TASK-033's untracked Strava OAuth files):
+  README.md (deleted, untracked-state)
+  beatyourself/components/layout/{BottomNav,Sidebar,nav-items}.{tsx,ts}
+  beatyourself/components/features/{ActiveChallengesList,ActivityForm,
+    ActivityHeatmap,WaterRing,WaterGoalForm,WaterHistoryList,
+    WaterChart,StravaDisconnectButton}.tsx
+  beatyourself/app/(app)/water/page.tsx
+  beatyourself/app/api/strava/{callback,connect}/ (TASK-033 untracked)
+  beatyourself/actions/{activities,water,strava}.ts
+  beatyourself/lib/strava/oauth.ts (TASK-033 untracked)
+  beatyourself/lib/services/{water,weight,dashboard}.ts
+  beatyourself/lib/validation/{water,weight}.ts
+  beatyourself/app/(app)/{dashboard,profile}/page.tsx
+  beatyourself/package-lock.json
+  package-lock.json (repo root)
+  ralph.sh
