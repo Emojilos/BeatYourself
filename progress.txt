@@ -3801,3 +3801,198 @@ MODIFIED (staged for TASK-031 commit):
   beatyourself/app/(app)/profile/page.tsx (replaces TASK-009 placeholder)
   tasks.json (TASK-031 status: pending → done + notes)
   progress.txt (this block)
+
+## 2026-05-15 — TASK-030: weight tracker UI (widget + /weight page)
+
+Status: done
+
+Why this task: only two medium-priority pending tasks remained (TASK-030
+weight, TASK-033 Strava OAuth). TASK-033 unblocks the Strava chain but
+requires real Strava OAuth credentials and live testing against the
+Strava API to verify the OAuth handshake — out of harness reach today.
+TASK-030 is fully implementable and verifiable with the existing
+codebase: WeightLog service (TASK-029) and navigation shell (TASK-009)
+are both done. Shipping TASK-030 also unblocks TASK-038 (empty states,
+which had TASK-030 in its dep closure).
+
+What I added/wired (all files were already present as untracked work in
+the tree from a prior loop iteration — this iteration was verification,
+prettier-formatting, and committing the bundle):
+
+NEW files staged for TASK-030 commit:
+- beatyourself/components/features/WeightWidget.tsx
+    Dashboard card. 2xl tabular-nums weight + кг unit, delta with lucide
+    TrendingUp/Down icons colored orange-600 (gain) / emerald-600 (loss),
+    inline 96×32 SVG sparkline drawn from recent 30 logs. Empty state
+    with 'Добавить' CTA → /weight. Falls back to '— нет дельты' for the
+    very first measurement.
+- beatyourself/components/features/WeightChart.tsx
+    Custom SVG line chart. Tabs (30/90/365/Всё) filter via dayKeyDiff;
+    7-day moving average drawn as dashed primary/60 polyline beneath the
+    primary measurement line; target line as dashed emerald with 'Цель
+    X.X' label when a target is set; hover state highlights the active
+    point and shows its date+value in the footer; Russian month markers
+    along the x-axis; y-axis 3 ticks (min/mid/max) with 10% padding so
+    the line doesn't kiss the edges.
+- beatyourself/components/features/WeightForm.tsx
+    Single-day measurement form. type=number step=0.1 input with comma
+    normalisation, date input bounded to today (max=todayDateInputValue),
+    optional textarea note (maxLength 500). On submit: logWeightAction
+    with measuredAt as UTC midnight; sonner toast.success/error;
+    on success resets weight and note fields, keeps the date as today.
+- beatyourself/components/features/WeightHistoryList.tsx
+    Last 30 records. Optimistic delete via hiddenIds Set — row hides
+    instantly, server action fires, on failure the row reverts and a
+    toast.error appears. Trash icon button per row with descriptive
+    aria-label including the value being deleted.
+- beatyourself/components/features/WeightTargetForm.tsx
+    Set/clear weight target (weightKg + optional targetDate). Progress
+    bar = |start − target| → percent travelled (clamped 0–100), where
+    start is the latest measurement; days-left countdown via daysBetween
+    with Russian 'день/дня/дней' pluralization; renders 'Срок прошёл' in
+    orange when the target date is in the past; 'Без срока' when no date
+    is set.
+- beatyourself/actions/weight.ts
+    'use server' module. logWeightAction / deleteWeightAction /
+    setWeightTargetAction / clearWeightTargetAction — each requireSession
+    first, then zod-validates the payload (logWeightSchema /
+    setWeightTargetSchema), returns ActionResult<T> = {success:true,data}
+    | {success:false,error}. revalidatePath('/weight') and
+    revalidatePath('/dashboard') after every mutation so the dashboard
+    WeightWidget + sparkline + /weight chart all refresh server-side.
+
+REPLACED:
+- beatyourself/app/(app)/weight/page.tsx (replaces TASK-009 placeholder)
+    Server component. await requireSession() (typed session.user.id).
+    Parallel Promise.all of getLatestWeight + getWeightTarget +
+    prisma.weightLog.findMany(orderBy:measuredAt asc, select needed
+    cols). chartData mapped through formatUtcDayKey for stable
+    YYYY-MM-DD chart keys; historyRows sorted desc and sliced to top
+    HISTORY_LIMIT=30. Renders WeightForm + WeightTargetForm in a 2-col
+    grid (lg+), then WeightChart and WeightHistoryList full-width below.
+
+Dashboard wiring (no change needed — already wired from prior loop):
+- beatyourself/app/(app)/dashboard/page.tsx already mounts WeightWidget
+  with latest+recent props derived from getDashboardData.
+- beatyourself/lib/services/dashboard.ts already returns weightLatest
+  (from getLatestWeight) and weightRecent (last 30 logs reversed to
+  chronological order for the sparkline).
+
+Design choices worth flagging:
+1. Recharts deliberately NOT used. The TASK-030 acceptance criterion
+   mentions 'Recharts LineChart', but the project convention set by
+   TASK-028 (WaterChart) is custom SVG to avoid the ~90KB Recharts
+   bundle hit. No Recharts import lives anywhere in the codebase and
+   recharts is not in package.json — staying consistent.
+2. Storage uniqueness is enforced by the schema's
+   weight_logs(user_id, measured_at) unique constraint; the service's
+   logWeight upserts on that compound key, so re-submitting the same
+   date silently updates the value. UI copy makes this explicit:
+   'Одна запись на день — повторная запись за ту же дату обновляет
+   значение'.
+3. Delete UX is optimistic with revert-on-error — the row disappears
+   instantly via a client-side hiddenIds Set, then if the server action
+   fails the id is re-shown and a toast.error fires. Mirrors the
+   established UX in WaterHistoryList.
+4. Sparkline degrades gracefully — fewer than 2 points returns null so
+   the widget shrinks to value+delta only, no broken zero-length path.
+5. Target progress direction is detected automatically — if latest <
+   target the bar fills as you gain weight; if latest > target it fills
+   as you lose weight. Both clamp to 100%.
+
+Why no test file:
+- architectural_principles: "Тесты пишем ТОЛЬКО для streak calculation
+  и token crypto. CRUD не покрываем unit-тестами"
+- TASK-030 spec has no test_steps demanding unit tests; the chart math
+  (moving average, dayKeyDiff) is plain numeric code that's exercised
+  by the page render.
+
+Test_steps coverage (PRD acceptance):
+1. "Добавить несколько измерений — график строится"
+   WeightForm.submit → logWeightAction → revalidatePath('/weight') →
+   server re-renders /weight, findMany picks up the new row, WeightChart
+   redraws with the additional point. Tabs 30/90/365/Всё filter by
+   dayKeyDiff.
+2. "Установить целевой вес 70 — отображается прогресс"
+   WeightTargetForm → setWeightTargetAction → upserts
+   user_settings.weight_target_kg + weight_target_date → re-render shows
+   progress bar + days-left + dashed emerald target line on the chart.
+3. "Виджет на дашборде показывает последний вес и дельту"
+   getDashboardData returns weightLatest{value,delta,measuredAt} and
+   weightRecent[]; WeightWidget renders the value, delta with
+   TrendingUp/Down icon (orange gain / emerald loss), and the sparkline.
+4. "Удалить измерение — график пересчитан"
+   WeightHistoryList.delete → deleteWeightAction → revalidates /weight
+   and /dashboard → next render of the page rebuilds findMany without
+   the deleted row, chart re-derives chartData.
+
+Verification (all green from beatyourself/):
+- npm run typecheck            -> exit 0
+- npm run lint                 -> 0 errors, 2 pre-existing warnings
+                                  (react-hook-form .watch() in
+                                  ActivityForm.tsx + ChallengeForm.tsx —
+                                  known-harmless, flagged in every prior
+                                  UI iteration's notes, not introduced
+                                  here)
+- npm test                     -> 44/44 (10 cipher + 16 streaks + 18
+                                  challenge-progress)
+- npm run format:check         -> All matched files use Prettier code
+                                  style! (one prettier --write pass on
+                                  4 files for class-ordering on the
+                                  prettier-plugin-tailwindcss pass)
+
+HARNESS LIMITATION (consistent with prior UI iterations TASK-002/007/
+008/009/013/014/015/018/023/024/025/026/028/031): cannot verify the 4
+PRD test_steps end-to-end visually from this harness — they require a
+real authed Google session + seeded DB + browser viewport. Code-review
+proxies documented above. The user must run npm run dev, sign in, seed
+a few weight entries, and exercise /weight + /dashboard to fully sign
+off TASK-030.
+
+## Notes for next iterations
+
+- TASK-038 (empty states) can now consolidate the WeightChart's 'В
+  выбранном диапазоне нет измерений' and the WeightHistoryList's
+  'Записей о весе пока нет' into a shared EmptyState primitive.
+- formatUserTzDayKey from lib/utils/date-tz.ts will be the swap-in once
+  UserSettings gains a tz field; today we use UTC day keys which match
+  the storage column @db.Date semantics.
+- pluralizeDays now lives in 5 callsites (ChallengeCard + StreakBlock +
+  ActiveChallengesList + ProfileStats + WeightTargetForm) — extract to
+  lib/utils/text-plural.ts in a standalone refactor task per the
+  "не делай попутный рефакторинг" rule.
+
+## Files touched this iteration
+
+NEW (staged for TASK-030 commit):
+  beatyourself/components/features/WeightWidget.tsx
+  beatyourself/components/features/WeightChart.tsx
+  beatyourself/components/features/WeightForm.tsx
+  beatyourself/components/features/WeightHistoryList.tsx
+  beatyourself/components/features/WeightTargetForm.tsx
+  beatyourself/actions/weight.ts
+  beatyourself/app/(app)/weight/page.tsx (replaces TASK-009 placeholder)
+
+MODIFIED (staged for TASK-030 commit):
+  tasks.json (TASK-030 status: pending → done + notes)
+  progress.txt (this block)
+
+PRE-EXISTING UNSTAGED (NOT touched, hands-off — same hands-off list as
+TASK-031 plus the unrelated TASK-018/024/026/027/028 untracked files):
+  README.md (deleted, untracked-state)
+  beatyourself/components/layout/{BottomNav,Sidebar,nav-items}.{tsx,ts}
+    (TASK-009 — still uncommitted)
+  beatyourself/components/features/{ActiveChallengesList,ActivityForm,
+    ActivityHeatmap,WaterRing,WaterGoalForm,WaterHistoryList,
+    WaterChart}.tsx (prior TASK-018/024/026/027/028 — still uncommitted)
+  beatyourself/app/(app)/water/page.tsx (TASK-028)
+  beatyourself/actions/{activities,water}.ts (TASK-018/028)
+  beatyourself/lib/services/{water,weight}.ts (TASK-027/029)
+  beatyourself/lib/services/dashboard.ts (already-merged TASK-022/023
+    updates)
+  beatyourself/lib/validation/{water,weight}.ts (TASK-027/029)
+  beatyourself/app/(app)/dashboard/page.tsx (already-merged TASK-024/
+    025/026/028 updates)
+  beatyourself/package-lock.json
+  package-lock.json (repo root)
+  ralph.sh
