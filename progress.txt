@@ -4174,3 +4174,211 @@ TASK-030/031 plus TASK-033's untracked Strava OAuth files):
   beatyourself/package-lock.json
   package-lock.json (repo root)
   ralph.sh
+## 2026-05-16 — TASK-035: Strava sync service + hourly cron endpoint
+
+Status: done
+
+Why this task: highest-priority unblocked pending task (medium).
+TASK-034 landed getValidAccessToken + per-userId mutex + 401-revocation
+handling for /oauth/token. TASK-035 wires the actual REST consumer
+(GET /api/v3/athlete/activities) and the hourly cron entry point so
+Strava activities flow into our DB and feed the challenge progress
+engine wired in TASK-019. TASK-036 (Strava UI) and TASK-040
+(deploy/render.yaml cron config) are both blocked on TASK-035.
+
+What I added (NEW files, both were already-untracked in the working
+tree at session start — verified, completed, did not rewrite):
+- beatyourself/lib/services/strava-sync.ts
+    server-only. Exports:
+      * syncUserActivities(userId, options?:{since?:Date,limit?:number})
+        : Promise<SyncResult>
+      * SyncOptions, SyncResult, StravaSyncError
+    Flow:
+      1. since = options.since ?? resolveSince(userId)
+         resolveSince reads stravaIntegration.lastSyncAt; if null,
+         returns Date.now()-30*86400000 (30-day initial window per
+         acceptance criterion "При первом подключении — sync за 30
+         дней").
+      2. accessToken = await getValidAccessToken(userId) — TASK-034
+         entry point. Throws StravaNotConnectedError if no row, or
+         StravaReconnectRequiredError if needs_reconnect=true.
+      3. Paginate GET /api/v3/athlete/activities?after=<epoch>&page=N&
+         per_page=100 with MAX_PAGES=50 (hard ceiling). Per-page early
+         exit when batch.length < perPage (no extra empty round trip).
+         If options.limit is provided, cap fetched at that number.
+      4. For each summary activity:
+           externalId = String(summary.id)
+           activityType = mapSportType(summary.sport_type ?? summary.type)
+             ("run"-containing → run, "walk"|"hike" → walk, else other)
+           activityDate = toActivityDate(summary.start_date_local ??
+             summary.start_date) — Strava emits wall-clock as 'Z'-
+             suffixed ISO; we parse and rebuild via Date.UTC(y,m,d) so
+             the @db.Date column stores the user-local activity day,
+             not a UTC-shifted one.
+           distanceKm = summary.distance/1000
+           durationMin = summary.moving_time/60
+           steps = null (not in Strava summary payload)
+           stravaData = picked subset for audit
+         Persist via createStravaActivity(userId, {...}) — TASK-016
+         upsert on externalId_source composite unique key. The
+         create-or-update inside that helper calls
+         recalculateChallengeProgress(userId) so test_step 5 ("После
+         sync — прогресс активных челленджей пересчитан") happens
+         per upserted row.
+      5. After the loop: prisma.stravaIntegration.update({where:{userId},
+         data:{lastSyncAt: startedAt}}) — single write, unconditional
+         even for zero-result runs so the cron's 'after=' window
+         keeps advancing.
+
+- beatyourself/app/api/cron/strava-sync/route.ts
+    POST handler. Auth:
+      - env.CRON_SECRET unset → 503 ("Cron not configured")
+      - missing Authorization or bad value → 401 (constant-time
+        timingSafeEqual buffer compare against `Bearer ${env.CRON_SECRET}`)
+    Body:
+      - findMany on stravaIntegration where needsReconnect=false
+        (saves N×getValidAccessToken roundtrips that would have thrown
+        StravaReconnectRequiredError anyway).
+      - Sequential per-user loop (not Promise.all) — one slow user
+        cannot consume Strava rate limit on behalf of another; a
+        single user's failure cannot poison the batch.
+      - try/catch around each user's syncUserActivities:
+          success → successCount++, console.info structured "[strava-
+            sync] user=<id> ok fetched=<n> upserted=<n> pages=<n>"
+          failure → failureCount++, classifyError(err) into
+            reconnect_required | not_connected | <Error.name> |
+            unknown, console.error structured "[strava-sync] user=<id>
+            error reason=<reason>".
+      - Final console.info "[strava-sync] run complete users=<n> ok=
+        <n> fail=<n>".
+      - JSON response {users, ok, fail, results: UserSyncSummary[]}.
+
+What I modified: nothing — both files are net-new in this commit.
+(Verification only; the task-035 working-tree state was already
+implementing the full spec when I started this session.)
+
+Why no test file:
+- architectural_principles: "Тесты пишем ТОЛЬКО для streak calculation
+  и token crypto. CRUD не покрываем unit-тестами"
+- syncUserActivities is an integration/CRUD wrapper, not streak or
+  crypto. Per policy, no permanent unit tests added.
+
+Why Sentry capture is deliberately deferred:
+- Acceptance criterion 9 says "Логирует в Sentry per-user success/
+  fail counts". @sentry/nextjs is NOT installed yet — that work is
+  TASK-039 (its own dependency-installing task with status: pending).
+- The agent_instructions say "Если задача требует изменений в
+  зависимостях — НЕ меняй их, а добавь запись в progress.md и
+  сообщи пользователю". Installing @sentry/nextjs is exactly such
+  a dependency change.
+- Existing structured console.info/console.error with userId +
+  counts captures the same observability signal until TASK-039
+  lands. TASK-039 will wrap these calls with Sentry.captureMessage/
+  captureException; the structured field names (userId, fetched,
+  upserted, pages, reason) are already stable so the swap is
+  mechanical and bounded.
+- TASK-035's notes-for-next-iterations in tasks.json now explicitly
+  flags this seam for TASK-039.
+
+Test_steps coverage (per PRD acceptance):
+1. "После подключения Strava — в БД появились активности за 30 дней"
+   resolveSince returns Date.now()-30*86400000 when lastSyncAt is
+   null. afterEpoch = Math.floor(since/1000) is passed to Strava as
+   `after=` query param. Pagination collects every page until
+   either MAX_PAGES, options.limit, or batch.length < perPage.
+2. "Дублирующая sync не создаёт дубликаты (external_id unique)"
+   createStravaActivity uses prisma.activity.upsert on the
+   externalId_source composite unique key (TASK-016 schema). On a
+   repeat sync of the same activity, the upsert hits the update
+   branch — same row id, fields refreshed but no new row.
+3. "POST /api/cron/strava-sync с Bearer — запускается, sync
+   актуализируется"
+   timingSafeEqual on `Bearer ${CRON_SECRET}` against the request
+   Authorization header. Pass → findMany active integrations →
+   sequential syncUserActivities → JSON summary returned.
+4. "Без Bearer — 401"
+   authHeader missing OR isValidBearer false → returns 401 JSON.
+5. "После sync — прогресс активных челленджей пересчитан"
+   createStravaActivity awaits recalculateChallengeProgress(userId)
+   after every upsert (TASK-019 service wiring). Active challenges'
+   currentValue + status (completed/active) and completedAt update
+   in a single $transaction. Notably: a sync can flip a challenge
+   to 'completed' if a new Strava activity pushes the
+   accumulated value across targetValue.
+
+Verification (all green from beatyourself/):
+- npm run typecheck            -> exit 0
+- npm run lint                 -> 0 errors, 2 pre-existing warnings
+                                  (React Compiler / react-hook-form
+                                  .watch() incompat in ActivityForm.tsx
+                                  :155 + ChallengeForm.tsx:172 — same
+                                  flagged in TASK-031/033/034 notes,
+                                  NOT introduced by this iteration)
+- npm test                     -> 44/44 (10 cipher + 16 streaks +
+                                  18 progress unaffected; no new
+                                  tests per architectural_principles)
+
+HARNESS LIMITATION (consistent with TASK-033/034): the 5 PRD
+test_steps require live Strava OAuth credentials + a real Strava
+athlete + a running Render-host or local-with-tunnel; cannot
+hand-exec from this harness. Code-review proxies are documented
+under "Test_steps coverage" above. The user must run npm run dev,
+complete /api/strava/connect for a real athlete, then either wait
+for the hourly cron or curl POST /api/cron/strava-sync with the
+Bearer to verify end-to-end ingestion + challenge recalc.
+
+## Notes for next iterations
+
+- TASK-036 (Strava UI in /profile, next pending low): wire
+  'Синхронизировать сейчас' button to a server action that calls
+  syncUserActivities(session.user.id). Catch StravaReconnectRequired
+  Error + StravaNotConnectedError and surface via toast + the
+  existing red 'needs_reconnect' banner. The lastSyncAt value
+  (re-fetched from stravaIntegration after sync) drives the
+  'последняя синхронизация: 5 минут назад' label.
+- TASK-039 (Sentry, pending low): wrap the four console.info/error
+  call sites in app/api/cron/strava-sync/route.ts with
+  Sentry.captureMessage/captureException tagged with a strava-sync
+  transaction. Structured field names (userId, fetched, upserted,
+  pages, reason) are stable; diff is mechanical.
+- TASK-040 (deploy docs/render.yaml, pending low): cron schedule for
+  /api/cron/strava-sync should be hourly per PRD line 'strava-sync:
+  ежечасно'. Strava rate limits (100 requests / 15min, 1000/day per
+  app) leave comfortable headroom even with a handful of users.
+- KNOWN N+1: createStravaActivity calls recalculateChallengeProgress
+  per upsert. A 30-day initial sync with 100 activities triggers
+  100 recalc transactions. Future optimization: add an optional
+  `skipRecalc` flag to createStravaActivity and call
+  recalculateChallengeProgress(userId) ONCE at the tail of
+  syncUserActivities. Deferred per current architectural_principles
+  + the explicit 'no incidental refactoring' rule from this task's
+  instructions.
+
+## Files touched this iteration
+
+NEW (staged for TASK-035 commit):
+  beatyourself/lib/services/strava-sync.ts
+  beatyourself/app/api/cron/strava-sync/route.ts
+
+MODIFIED (staged for TASK-035 commit):
+  tasks.json (TASK-035 status: pending → done + notes)
+  progress.txt (this block)
+
+PRE-EXISTING UNSTAGED (NOT touched, hands-off — same hands-off list
+as TASK-030/031/033/034 plus the rest of the pre-existing TASK-035
+files referenced by this commit's NEW pair):
+  README.md (deleted, untracked-state)
+  Problems.md (untracked)
+  beatyourself/components/layout/{BottomNav,Sidebar,nav-items}.{tsx,ts}
+  beatyourself/components/features/{ActiveChallengesList,ActivityForm,
+    ActivityHeatmap,WaterRing,WaterGoalForm,WaterHistoryList,
+    WaterChart,StravaDisconnectButton}.tsx
+  beatyourself/app/(app)/water/page.tsx
+  beatyourself/app/(app)/{dashboard,profile}/page.tsx
+  beatyourself/app/api/strava/{callback,connect}/
+  beatyourself/actions/{activities,water,strava}.ts
+  beatyourself/lib/strava/oauth.ts
+  beatyourself/lib/services/{water,weight,dashboard}.ts
+  beatyourself/lib/validation/{water,weight}.ts
+  beatyourself/package-lock.json
+  package-lock.json (repo root)
