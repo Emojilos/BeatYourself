@@ -1,16 +1,26 @@
-import Link from "next/link";
 import { Activity, Award, Footprints, Map, Timer, User } from "lucide-react";
 import type { Difficulty } from "@prisma/client";
 
 import { ProfileArchive } from "@/components/features/ProfileArchive";
 import { ProfileSignOutButton } from "@/components/features/ProfileSignOutButton";
-import { Button } from "@/components/ui/button";
+import { StravaSection } from "@/components/features/StravaSection";
 import { Card, CardContent } from "@/components/ui/card";
 import { requireSession } from "@/lib/auth/session";
 import { getProfileData, type ProfileFilter, type ProfileStats } from "@/lib/services/profile";
 
 interface ProfilePageProps {
-  searchParams: Promise<{ year?: string; difficulty?: string }>;
+  searchParams: Promise<{
+    year?: string;
+    difficulty?: string;
+    strava?: string;
+    reason?: string;
+  }>;
+}
+
+function parseStravaCallback(value: string | undefined): "connected" | "error" | null {
+  if (value === "connected") return "connected";
+  if (value === "error") return "error";
+  return null;
 }
 
 const DIFFICULTY_VALUES = new Set<Difficulty>(["easy", "medium", "hard"]);
@@ -63,6 +73,12 @@ export default async function ProfilePage({ searchParams }: ProfilePageProps) {
 
       <StatsBlock stats={data.stats} />
 
+      <StravaSection
+        connection={data.stravaConnection}
+        callbackStatus={parseStravaCallback(params.strava)}
+        callbackReason={params.reason ?? null}
+      />
+
       <ProfileArchive
         completed={data.completed}
         failed={data.failed}
@@ -73,23 +89,8 @@ export default async function ProfilePage({ searchParams }: ProfilePageProps) {
 
       <section
         aria-label="Действия профиля"
-        className="flex flex-col gap-3 border-t pt-6 sm:flex-row sm:items-center sm:justify-between"
+        className="flex flex-col gap-3 border-t pt-6 sm:flex-row sm:items-center sm:justify-end"
       >
-        <div>
-          {data.stravaConnected ? (
-            <p className="text-muted-foreground inline-flex items-center gap-2 text-sm">
-              <Award className="size-4" />
-              Strava подключён
-            </p>
-          ) : (
-            <Button asChild variant="outline">
-              <Link href="/api/strava/connect">
-                <Activity />
-                Подключить Strava
-              </Link>
-            </Button>
-          )}
-        </div>
         <ProfileSignOutButton />
       </section>
     </main>

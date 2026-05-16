@@ -4588,3 +4588,214 @@ list as TASK-030/031/033/034/035):
   beatyourself/lib/validation/{water,weight}.ts
   beatyourself/package-lock.json
   package-lock.json (repo root)
+
+## 2026-05-17 — TASK-036: Strava UI in /profile + sync indicator
+
+Status: done
+
+Why this task: the 5 remaining pending tasks are all "low"
+priority, but TASK-036 has the most direct user-facing impact —
+it exposes the existing TASK-035 Strava sync service to the user.
+Without TASK-036 a connected user has no way to see athlete_id,
+last-sync time, or trigger a manual sync; the OAuth callback
+redirects to /profile but the prior partial UI shows only a
+generic "Strava подключён" label. Acceptance criteria explicitly
+list all four states (disconnected / connected normal / needs
+reconnect / pending sync) plus toasts — the full UX loop.
+
+What I added (NEW files):
+- beatyourself/components/features/StravaSection.tsx
+    Client component. Receives:
+      connection: StravaConnection | null
+      callbackStatus?: "connected" | "error" | null
+      callbackReason?: string | null
+    Renders 4 states:
+      1. connection===null → DisconnectedView
+         (<Link href="/api/strava/connect"> + caption)
+      2. connection && !needsReconnect → ConnectedView with
+         sync button (RefreshCw spins when pending) +
+         disconnect button (Unlink) + Athlete ID +
+         relative-time "последняя синхронизация: 5 минут назад"
+         label (formatRelativeRu, custom RU pluralization)
+      3. connection && needsReconnect → ReconnectBanner
+         (border-destructive/40 + AlertTriangle + "Требуется
+         переподключение Strava" + "Переподключить" link to
+         /api/strava/connect)
+      4. pending sync → button label switches to
+         "Синхронизируем…" + spinner
+    On-mount useEffect inspects callbackStatus from
+    searchParams (?strava=connected|error[&reason=...]) and
+    fires a one-shot toast — guarded by useRef latch so
+    StrictMode double-effect cannot toast twice.
+    REASON_LABELS maps the 4 redirect reason codes emitted by
+    app/api/strava/{connect,callback}/route.ts:
+      not_configured, invalid_state, exchange_failed,
+      access_denied
+    Generic fallback: "Не удалось подключить Strava: <reason>".
+
+What I modified:
+- beatyourself/actions/strava.ts
+    + ActionResult<T> type alias (matches actions/{water,
+      weight,activities,challenges}.ts)
+    + SyncStravaResult {upserted,fetched,lastSyncAt}
+    + syncStravaAction() — calls syncUserActivities from
+      lib/services/strava-sync (TASK-035); re-fetches
+      stravaIntegration for fresh lastSyncAt; revalidatePath
+      ("/profile"). Catches:
+        StravaReconnectRequiredError →
+          {success:false, error:"Требуется переподключение
+          Strava"} + revalidatePath so the banner appears
+          next render
+        StravaNotConnectedError →
+          {success:false, error:"Strava не подключён"}
+        Other Error → message string
+    Existing disconnectStravaAction kept as-is.
+- beatyourself/lib/services/profile.ts
+    + StravaConnection interface
+      {athleteId:string, lastSyncAt:Date|null, connectedAt:
+      Date, needsReconnect:boolean}
+    + ProfileData.stravaConnection: StravaConnection | null
+      (additive; stravaConnected:boolean kept for back-compat)
+    + prisma.stravaIntegration.findUnique select now returns
+      stravaAthleteId/lastSyncAt/connectedAt/needsReconnect
+    + BigInt → string at the service boundary
+      (stravaAthleteId.toString()) — Next's RSC payload
+      encoder does not serialize BigInt; doing the conversion
+      here keeps every consumer free of .toString() calls.
+- beatyourself/app/(app)/profile/page.tsx
+    + Imports StravaSection (replaces StravaDisconnectButton)
+    + searchParams typing extended:
+      year? + difficulty? + strava? + reason?
+    + parseStravaCallback() normalizes raw string to
+      "connected" | "error" | null
+    + <StravaSection connection={data.stravaConnection}
+        callbackStatus={parseStravaCallback(params.strava)}
+        callbackReason={params.reason ?? null} />
+    + Removed inline Strava block (connect link / connected
+      label / disconnect button) — superseded by
+      StravaSection which renders the full 4-state matrix
+    + ProfileSignOutButton kept; actions row simplified to
+      justify-end (it now hosts only sign-out)
+
+## Design notes
+
+- Sync button uses local React.useState (not useFormStatus)
+  because the handler needs to display a toast AFTER the
+  action resolves. useFormStatus is form-submission scoped
+  and resets the instant the action returns — that would
+  race against toast.success(). Same pattern as
+  WaterGoalForm (TASK-027).
+- BigInt stringified at the service layer, not the
+  component. The decision lives in profile.ts so any future
+  consumer of stravaConnection (Sentry context, debug
+  panels, etc.) doesn't have to remember the rule.
+- revalidatePath('/profile') in BOTH syncStravaAction
+  branches (success + reconnect-required) and in
+  disconnectStravaAction → next render reflects fresh
+  lastSyncAt or fresh banner state.
+- Sync is fire-and-toast, not optimistic. Strava REST
+  latency varies from ~200ms (zero-results re-sync) to
+  several seconds (initial 30-day pull). Spinner + disabled
+  button is sufficient UX; optimistic counter would lie
+  about the upserted total.
+- Russian relative-time is custom (not Intl.RelativeTimeFormat).
+  RTF emits "N дней назад" but lacks the "только что" /
+  "минуту назад" tier. The spec example
+  "последняя синхронизация: 5 минут назад" is produced
+  directly by the custom formatter.
+- The orphan StravaDisconnectButton.tsx (pre-existing
+  untracked from earlier partial work) is LEFT ON DISK
+  untouched and NOT included in this commit. Per the
+  hands-off-on-pre-existing-untracked policy from prior
+  iterations, the file stays as untracked work; it simply
+  no longer has any importer.
+
+## Verification
+
+- npm run typecheck — clean
+- npm run lint — 0 errors, 2 pre-existing react-hook-form
+  .watch() warnings on ActivityForm/ChallengeForm (flagged
+  in TASK-031/033/034/035 notes), NOT introduced by this
+  task
+- npm test — 48/48 passed (no new permanent tests added per
+  architectural_principles "Тесты пишем ТОЛЬКО для streak
+  calculation и token crypto")
+- npm run format:check — clean after one prettier --write
+  pass on actions/strava.ts +
+  components/features/StravaSection.tsx (other pre-existing
+  unformatted files left alone per no-incidental-refactor)
+
+## Harness limitation (consistent with prior UI tasks)
+
+Cannot live-exec the 4 PRD test_steps without real Strava
+OAuth credentials + a connected user. Code-review proxies:
+- test_step 1 (no connection → "Подключить" button):
+    DisconnectedView renders <Link href="/api/strava/connect">
+    when connection===null
+- test_step 2 (connected → status + last_sync_at):
+    ConnectedView renders Athlete ID + formatRelativeRu
+    (lastSyncAt) or "ещё не синхронизировано" fallback
+- test_step 3 (click sync → toast "Синхронизировано N
+  активностей"): handleSync awaits syncStravaAction;
+  on success toast.success(`Синхронизировано ${upserted}
+  ${pluralizeActivities(upserted)}`)
+- test_step 4 (needs_reconnect → red warning): ConnectedView
+  branches on connection.needsReconnect to render
+  ReconnectBanner (border-destructive/40 + AlertTriangle +
+  "Требуется переподключение Strava" + "Переподключить").
+  User can hand-flip the boolean in DB
+  (UPDATE strava_integrations SET needs_reconnect=true ...)
+  to verify the visual.
+
+## Notes for next iterations
+
+- TASK-038 (empty states + error UX, next pending low):
+  DisconnectedView is the canonical empty-state pattern for
+  an unconfigured integration. When EmptyState is extracted
+  in TASK-038, reference this section's layout.
+- TASK-039 (Sentry, pending low): syncStravaAction's
+  generic catch arm currently swallows non-Strava errors
+  into a string-message ActionResult. When Sentry lands,
+  capture the underlying error there with a
+  strava-sync-action transaction tag + userId scope.
+- TASK-040 (deploy docs/render.yaml, pending low):
+  no impact on TASK-036.
+- Pluralize helpers (pluralizeActivities/Minutes/Hours/
+  Days) are now duplicated in 7+ callsites — extraction to
+  lib/utils/text-plural.ts is the highest-value refactor
+  target before the next surface lands. Deferred per
+  "не делай попутный рефакторинг".
+- The 4 OAuth redirect reason codes are stable. Adding a
+  5th in app/api/strava/callback/route.ts requires a
+  matching REASON_LABELS entry in StravaSection.tsx.
+
+## Files touched this iteration
+
+NEW (staged for TASK-036 commit):
+  beatyourself/components/features/StravaSection.tsx
+
+MODIFIED (staged for TASK-036 commit):
+  beatyourself/actions/strava.ts
+  beatyourself/lib/services/profile.ts
+  beatyourself/app/(app)/profile/page.tsx
+  tasks.json (TASK-036 status: pending → done + notes)
+  progress.txt (this block)
+
+PRE-EXISTING UNSTAGED (NOT touched, hands-off — same list
+as TASK-030/031/032/033/034/035):
+  README.md (deleted, untracked-state)
+  Problems.md (untracked)
+  beatyourself/components/layout/{BottomNav,Sidebar,
+    nav-items}.{tsx,ts}
+  beatyourself/components/features/{ActiveChallengesList,
+    ActivityForm,ActivityHeatmap,WaterRing,WaterGoalForm,
+    WaterHistoryList,WaterChart,StravaDisconnectButton}.tsx
+  beatyourself/app/(app)/water/page.tsx
+  beatyourself/app/(app)/dashboard/page.tsx
+  beatyourself/app/api/strava/{callback,connect}/
+  beatyourself/actions/{activities,water}.ts
+  beatyourself/lib/strava/oauth.ts
+  beatyourself/lib/services/{water,weight,dashboard}.ts
+  beatyourself/lib/validation/{water,weight}.ts
+  beatyourself/package-lock.json
+  package-lock.json (repo root)

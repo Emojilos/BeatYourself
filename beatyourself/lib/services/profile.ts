@@ -25,6 +25,13 @@ export interface ProfileStats {
   longestStreak: number;
 }
 
+export interface StravaConnection {
+  athleteId: string;
+  lastSyncAt: Date | null;
+  connectedAt: Date;
+  needsReconnect: boolean;
+}
+
 export interface ProfileData {
   user: ProfileUser;
   stats: ProfileStats;
@@ -32,6 +39,7 @@ export interface ProfileData {
   failed: Challenge[];
   availableYears: number[];
   stravaConnected: boolean;
+  stravaConnection: StravaConnection | null;
 }
 
 export interface GetProfileOptions {
@@ -68,7 +76,12 @@ export async function getProfileData(
       }),
       prisma.stravaIntegration.findUnique({
         where: { userId },
-        select: { userId: true },
+        select: {
+          stravaAthleteId: true,
+          lastSyncAt: true,
+          connectedAt: true,
+          needsReconnect: true,
+        },
       }),
     ]);
 
@@ -97,6 +110,14 @@ export async function getProfileData(
     failed,
     availableYears,
     stravaConnected: stravaIntegration !== null,
+    stravaConnection: stravaIntegration
+      ? {
+          athleteId: stravaIntegration.stravaAthleteId.toString(),
+          lastSyncAt: stravaIntegration.lastSyncAt,
+          connectedAt: stravaIntegration.connectedAt,
+          needsReconnect: stravaIntegration.needsReconnect,
+        }
+      : null,
   };
 }
 
