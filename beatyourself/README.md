@@ -69,6 +69,10 @@ Then open [http://localhost:3000](http://localhost:3000).
 
 See `.env.example` at the repository root for the list of required environment variables. Local values go in `.env.local` (gitignored).
 
+## Deployment
+
+Production deploy (Render + Neon + UptimeRobot, plus the two cron jobs) is documented step-by-step in [`../DEPLOY.md`](../DEPLOY.md). The repo root also ships a `render.yaml` blueprint.
+
 ## Conventions
 
 - Server actions are the primary path for mutations. `/api/*` is reserved for Strava callbacks, webhooks and cron endpoints.

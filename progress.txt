@@ -4799,3 +4799,232 @@ as TASK-030/031/032/033/034/035):
   beatyourself/lib/validation/{water,weight}.ts
   beatyourself/package-lock.json
   package-lock.json (repo root)
+
+## 2026-05-17 — TASK-040: deploy docs (Render + Neon + UptimeRobot) + /api/health
+
+Status: done
+
+Why this task: of the 4 remaining "low"-priority pending
+tasks (037 confetti, 038 empty-states+errors, 039 Sentry,
+040 deploy), TASK-040 is the only ship-blocker. Without
+DEPLOY.md the operator has to reverse-engineer the env
+matrix from config/env.ts + the cron routes, and without
+/api/health UptimeRobot has no liveness target. None of the
+other low-priority work matters until the app can actually
+be deployed and monitored — so 040 unlocks the path to
+production for everything else.
+
+What I added (NEW files):
+- beatyourself/app/api/health/route.ts
+    GET handler, no auth (UptimeRobot can't carry bearer
+    tokens; payload reveals nothing sensitive). Pings
+    Postgres with prisma.$queryRaw(Prisma.sql`SELECT 1`)
+    inside try/catch:
+      success → 200 {status:"ok", db:"ok", timestamp:ISO}
+      DB throw → 503 {status:"error", db:"error",
+                      timestamp:ISO} + console.error
+                      "[health] db ping failed <err>"
+    HealthPayload interface narrows status/db to the two
+    valid literal pairs. Response.json uses explicit
+    {status: N} for both branches.
+
+- DEPLOY.md (at repo root)
+    Operator-facing walkthrough, 6 sections + troubleshooting:
+      1. Neon project setup — pooled URL → DATABASE_URL,
+         direct URL → DATABASE_URL_DIRECT (for prisma
+         migrate deploy), region-co-location note.
+      2. Render Web Service — Option A (Blueprint via
+         render.yaml) + Option B (manual, lists every
+         setting incl. rootDir=beatyourself,
+         healthCheckPath=/api/health).
+      3. Environment variables — matrix mapping every var
+         in config/env.ts to required/optional + generator
+         (openssl rand) + notes (e.g. STRAVA_REDIRECT_URI
+         must match the public domain). Google OAuth
+         redirect-URI subsection.
+      4. UptimeRobot — HTTP(s) monitor, 5-min interval,
+         documents the exact 200 and 503 payloads from the
+         health route.
+      5a. Render Cron Jobs (recommended).
+      5b. GitHub Actions fallback for users stuck on
+          Render's free plan (no native cron there) — full
+          .github/workflows/cron.yml example with
+          APP_URL/CRON_SECRET secrets.
+      6. First-deploy checklist (8 items).
+      Troubleshooting: /api/health=503 root causes,
+        env-throws-on-boot, cron 401, Strava
+        reconnect_required, free-tier cold starts.
+
+- render.yaml (at repo root)
+    Render Blueprint: 1 web service + 2 cron services.
+      web (beatyourself-web):
+        runtime=node, plan=free, rootDir=beatyourself,
+        region=frankfurt, branch=main, autoDeploy=true,
+        buildCommand="npm ci && npx prisma generate &&
+          npm run build",
+        startCommand="npm run start",
+        healthCheckPath=/api/health.
+        envVars: every config/env.ts variable +
+          NODE_VERSION=20. All app secrets have
+          sync:false so Render prompts on Blueprint apply
+          and nothing leaks into the manifest.
+      cron (beatyourself-check-deadlines):
+        runtime=image, plan=starter (Render cron requires
+        starter min — declared explicitly so provisioning
+        doesn't silently downgrade), schedule="0 3 * * *"
+        UTC, image=docker.io/curlimages/curl:latest,
+        dockerCommand curls POST $APP_URL/api/cron/
+        check-deadlines with Authorization: Bearer
+        $CRON_SECRET. APP_URL + CRON_SECRET are sync:false.
+      cron (beatyourself-strava-sync):
+        same image + auth pattern, schedule="0 * * * *"
+        UTC, curls /api/cron/strava-sync.
+
+What I modified:
+- beatyourself/README.md
+    Added one H2 "Deployment" section immediately after
+    "Environment" linking to [`../DEPLOY.md`](../DEPLOY.md)
+    and mentioning the repo-root render.yaml. No other
+    text changed — kept the existing stack/folder/scripts/
+    conventions sections untouched per
+    "не делай попутный рефакторинг".
+
+## Design notes
+
+- Health endpoint is GET, not POST. UptimeRobot's default
+  is HTTP GET; the cron endpoints stay POST so the
+  auth-protected mutation surface is not duplicated under
+  GET. Following REST: "is this resource healthy?" is a
+  read-only question.
+- SELECT 1 is the smallest possible DB probe — fast, no
+  table dependencies, won't break if a migration is
+  mid-deploy or if the schema is empty. Doesn't depend on
+  prisma.user.findFirst() or similar which would couple
+  health to the schema shape.
+- Endpoint is intentionally unauthenticated. UptimeRobot
+  and Render's health check don't carry bearer tokens. The
+  payload reveals only {status, db, timestamp} — no row
+  counts, no email, no DB URL fragments. The bearer-token
+  pattern from /api/cron/* is wrong here precisely because
+  UptimeRobot cannot send headers without paying for the
+  Pro plan.
+- 503 (not 500) for DB failure. "503 Service Unavailable"
+  is the standard signal that an upstream dependency is
+  down; UptimeRobot treats all 5xx as down, but 503
+  documents intent for operators reading logs.
+- render.yaml cron services use runtime=image +
+  curlimages/curl instead of a Node container. We avoid
+  shipping a second build of the app just to fire a curl,
+  the image is ~5 MB, and the cron-as-curl pattern matches
+  what the GitHub Actions fallback in DEPLOY.md does.
+- sync:false on every secret in render.yaml prevents the
+  manifest from becoming a vector for committed secrets.
+  Render prompts on Blueprint apply, values stay
+  dashboard-side, and rotating a secret is one dashboard
+  edit instead of a git commit.
+- Both cron schedules are UTC (Render's contract).
+  "0 3 * * *" for check-deadlines runs at 03:00 UTC,
+  before most users wake up — failed challenges flip to
+  "failed" state before the user opens the app to a
+  surprise; "0 * * * *" for strava-sync at the top of
+  every hour matches Strava activity creation cadence.
+- Did NOT undelete the root README.md (still
+  tracked-as-deleted in git status from before this task).
+  Per the hands-off-on-pre-existing-untracked policy from
+  TASK-030/031/032/033/034/035/036 and the explicit
+  progress.txt note "Project README now lives at
+  beatyourself/README.md. Don't restore the old one." —
+  the deploy link goes into beatyourself/README.md, not a
+  resurrected root README.
+
+## Verification
+
+- npm run typecheck — clean
+- npm run lint — 0 errors, 2 pre-existing react-hook-form
+  .watch() warnings on ActivityForm/ChallengeForm (flagged
+  in TASK-031/033/034/035/036 notes), NOT introduced by
+  this task
+- npm test — 48/48 passed (no new tests added per
+  architectural_principles "Тесты пишем ТОЛЬКО для streak
+  calculation и token crypto")
+
+## Harness limitation
+
+Cannot live-exec the test_step "симулировать падение БД →
+/api/health возвращает 503" without forcing a real DB-down
+condition. Code-review proxies:
+- test_step 1 (open /api/health locally → 200 OK with db
+  status): the GET handler returns Response.json(
+    {status:'ok',db:'ok',timestamp:ISO}, {status:200}
+  ) on the SELECT-1 success path.
+- test_step 2 (DB down → 503): the try/catch around
+  $queryRaw catches any throw and returns Response.json(
+    {status:'error',db:'error',timestamp:ISO},{status:503}
+  ). An operator can verify by setting DATABASE_URL to a
+  wrong host then GET-ing /api/health.
+- test_step 3 (DEPLOY.md is sufficient for reproducing the
+  deploy): by construction — the 6-section walkthrough +
+  checklist + troubleshooting covers Neon, Render
+  (Blueprint + manual), envs (full matrix), UptimeRobot,
+  both cron schedules + free-tier fallback.
+
+## Notes for next iterations
+
+- TASK-039 (Sentry, last infra task, pending):
+  /api/health's catch arm is currently console.error-only.
+  When Sentry lands, wrap with Sentry.captureException(
+    err, { tags: { route: 'health' } }
+  ) so DB-down events page the operator independently of
+  UptimeRobot's polling interval.
+- TASK-038 (empty states + error UX, last UI task,
+  pending): no overlap with deploy infra. EmptyState
+  pattern unaffected by this change.
+- TASK-037 (confetti on challenge complete, pending):
+  unaffected.
+- If a future migration adds long-running startup work
+  (seed, cache warm), /api/health may need to distinguish
+  "app booting" from "db down" — e.g. return 503 with
+  status:'starting' until the first request lands. Not
+  needed now: current boot path throws synchronously on
+  bad env (config/env.ts) and otherwise serves
+  immediately.
+- render.yaml uses plan:free for the web service (fine
+  until paying users); cron Jobs require plan:starter
+  minimum on Render — declared explicitly to avoid silent
+  provisioning failures. If the operator wants zero spend,
+  delete the two cron blocks and use the GitHub Actions
+  fallback documented in DEPLOY.md § 5b.
+- The 4-state Strava UI (TASK-036) is unaffected by this
+  task; STRAVA_REDIRECT_URI is documented in DEPLOY.md § 3
+  as needing the public domain.
+
+## Files touched this iteration
+
+NEW (staged for TASK-040 commit):
+  beatyourself/app/api/health/route.ts
+  DEPLOY.md
+  render.yaml
+
+MODIFIED (staged for TASK-040 commit):
+  beatyourself/README.md
+  tasks.json (TASK-040 status: pending → done + notes)
+  progress.txt (this block)
+
+PRE-EXISTING UNSTAGED (NOT touched, hands-off — same list
+as TASK-030/031/032/033/034/035/036):
+  README.md (deleted, untracked-state)
+  Problems.md (untracked)
+  beatyourself/components/layout/{BottomNav,Sidebar,
+    nav-items}.{tsx,ts}
+  beatyourself/components/features/{ActiveChallengesList,
+    ActivityForm,ActivityHeatmap,WaterRing,WaterGoalForm,
+    WaterHistoryList,WaterChart,StravaDisconnectButton}.tsx
+  beatyourself/app/(app)/water/page.tsx
+  beatyourself/app/(app)/dashboard/page.tsx
+  beatyourself/app/api/strava/{callback,connect}/
+  beatyourself/actions/{activities,water}.ts
+  beatyourself/lib/strava/oauth.ts
+  beatyourself/lib/services/{water,weight,dashboard}.ts
+  beatyourself/lib/validation/{water,weight}.ts
+  beatyourself/package-lock.json
+  package-lock.json (repo root)

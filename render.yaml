@@ -1,0 +1,80 @@
+# Render Blueprint for BeatYourself.
+# Apply via: Render → New → Blueprint → connect this repo.
+# Full deploy walkthrough: ./DEPLOY.md
+#
+# Values marked `sync: false` are intentionally NOT committed — Render will
+# prompt for them on first apply, and they stay in the dashboard from then on.
+
+services:
+  - type: web
+    name: beatyourself-web
+    runtime: node
+    plan: free
+    rootDir: beatyourself
+    region: frankfurt
+    branch: main
+    buildCommand: npm ci && npx prisma generate && npm run build
+    startCommand: npm run start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: DATABASE_URL
+        sync: false
+      - key: NEXTAUTH_SECRET
+        sync: false
+      - key: NEXTAUTH_URL
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: ALLOWED_EMAIL
+        sync: false
+      - key: STRAVA_CLIENT_ID
+        sync: false
+      - key: STRAVA_CLIENT_SECRET
+        sync: false
+      - key: STRAVA_REDIRECT_URI
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+
+  - type: cron
+    name: beatyourself-check-deadlines
+    runtime: image
+    plan: starter
+    region: frankfurt
+    schedule: "0 3 * * *"
+    image:
+      url: docker.io/curlimages/curl:latest
+    dockerCommand: >
+      sh -c 'curl -fsS -X POST "$APP_URL/api/cron/check-deadlines"
+      -H "Authorization: Bearer $CRON_SECRET"'
+    envVars:
+      - key: APP_URL
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+
+  - type: cron
+    name: beatyourself-strava-sync
+    runtime: image
+    plan: starter
+    region: frankfurt
+    schedule: "0 * * * *"
+    image:
+      url: docker.io/curlimages/curl:latest
+    dockerCommand: >
+      sh -c 'curl -fsS -X POST "$APP_URL/api/cron/strava-sync"
+      -H "Authorization: Bearer $CRON_SECRET"'
+    envVars:
+      - key: APP_URL
+        sync: false
+      - key: CRON_SECRET
+        sync: false
