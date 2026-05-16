@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildDailySeries,
   calculateProgress,
   type ProgressActivity,
   type ProgressChallenge,
@@ -204,5 +205,63 @@ describe("calculateProgress — period boundaries", () => {
     const snapshot = acts.map((a) => ({ ...a }));
     calculateProgress(challenge, acts);
     expect(acts.map((a) => ({ ...a }))).toEqual(snapshot);
+  });
+});
+
+describe("buildDailySeries", () => {
+  const APRIL_10_TO_15: ProgressChallenge = {
+    type: "cumulative",
+    metric: "distance_km",
+    startDate: date("2026-04-10"),
+    endDate: date("2026-04-15"),
+  };
+
+  it("emits one point per day in [startDate, endDate] inclusive", () => {
+    const series = buildDailySeries(APRIL_10_TO_15, []);
+    expect(series.map((p) => p.dayKey)).toEqual([
+      "2026-04-10",
+      "2026-04-11",
+      "2026-04-12",
+      "2026-04-13",
+      "2026-04-14",
+      "2026-04-15",
+    ]);
+    expect(series.every((p) => p.daily === 0 && p.cumulative === 0)).toBe(true);
+  });
+
+  it("accumulates daily sums per metric for cumulative challenges", () => {
+    const series = buildDailySeries(APRIL_10_TO_15, [
+      activity("2026-04-10", { distanceKm: 5 }),
+      activity("2026-04-12", { distanceKm: 7 }),
+      activity("2026-04-12", { distanceKm: 3 }),
+      activity("2026-04-15", { distanceKm: 2 }),
+    ]);
+    expect(series.map((p) => p.daily)).toEqual([5, 0, 10, 0, 0, 2]);
+    expect(series.map((p) => p.cumulative)).toEqual([5, 5, 15, 15, 15, 17]);
+  });
+
+  it("treats out-of-period activities as zero", () => {
+    const series = buildDailySeries(APRIL_10_TO_15, [
+      activity("2026-04-09", { distanceKm: 100 }),
+      activity("2026-04-12", { distanceKm: 4 }),
+      activity("2026-04-16", { distanceKm: 100 }),
+    ]);
+    expect(series.find((p) => p.dayKey === "2026-04-12")?.daily).toBe(4);
+    expect(series[series.length - 1].cumulative).toBe(4);
+  });
+
+  it("computes daily values for single_day challenges (no metric-type difference)", () => {
+    const single: ProgressChallenge = {
+      type: "single_day",
+      metric: "steps",
+      startDate: date("2026-04-10"),
+      endDate: date("2026-04-12"),
+    };
+    const series = buildDailySeries(single, [
+      activity("2026-04-10", { steps: 30000 }),
+      activity("2026-04-10", { steps: 5000 }),
+      activity("2026-04-12", { steps: 12000 }),
+    ]);
+    expect(series.map((p) => p.daily)).toEqual([35000, 0, 12000]);
   });
 });

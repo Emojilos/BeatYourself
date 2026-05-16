@@ -73,3 +73,40 @@ function isInPeriod(date: Date, start: Date, end: Date): boolean {
 function utcDayKey(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
+
+export type DailyProgressPoint = {
+  dayKey: string;
+  daily: number;
+  cumulative: number;
+};
+
+export function buildDailySeries(
+  challenge: ProgressChallenge,
+  activities: readonly ProgressActivity[],
+): DailyProgressPoint[] {
+  const inPeriod = activities.filter((a) =>
+    isInPeriod(a.activityDate, challenge.startDate, challenge.endDate),
+  );
+
+  const byDay = new Map<string, ProgressActivity[]>();
+  for (const a of inPeriod) {
+    const key = utcDayKey(a.activityDate);
+    const bucket = byDay.get(key);
+    if (bucket) bucket.push(a);
+    else byDay.set(key, [a]);
+  }
+
+  const series: DailyProgressPoint[] = [];
+  let cumulative = 0;
+  const start = challenge.startDate.getTime();
+  const end = challenge.endDate.getTime();
+  const ONE_DAY = 24 * 60 * 60 * 1000;
+  for (let t = start; t <= end; t += ONE_DAY) {
+    const key = utcDayKey(new Date(t));
+    const bucket = byDay.get(key);
+    const daily = bucket ? sumByMetric(bucket, challenge.metric) : 0;
+    cumulative += daily;
+    series.push({ dayKey: key, daily, cumulative });
+  }
+  return series;
+}

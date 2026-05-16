@@ -4382,3 +4382,209 @@ files referenced by this commit's NEW pair):
   beatyourself/lib/validation/{water,weight}.ts
   beatyourself/package-lock.json
   package-lock.json (repo root)
+## 2026-05-16 — TASK-032: Challenge detail page /challenges/[id]
+
+Status: done
+
+Why this task: only "low"-priority items remain pending, but
+TASK-032 has the highest user-facing impact among them because
+/challenges/[id] is already linked from ChallengeCard,
+ActiveChallengesList, and EditChallengeForm's redirect path —
+all of which 404 until this lands. It also unblocks TASK-037
+(confetti), which has TASK-032 as its single dependency.
+TASK-036/038/039/040 are scoped to other surfaces and don't
+unblock anything.
+
+What I added (NEW files):
+- beatyourself/app/(app)/challenges/[id]/page.tsx
+    Server component. Pipeline:
+      1. requireSession() — auth gate (TASK-008 cascade)
+      2. await params: { id }  — Next 16 typed Promise<{id}>
+      3. getChallenge(userId, id) → notFound() if null
+         (IDOR-scoped via findFirst {where:{id, userId}})
+      4. listActivities(userId, {from:startDate, to:endDate})
+         — service builds where.activityDate.gte/lte on @db.Date
+         columns = calendar-day-inclusive comparison
+      5. buildDailySeries(challenge, activities) — daily series
+         for the chart (new helper, see "What I modified")
+      6. formatUtcDayKey(new Date()) — todayKey for the chart
+         vertical marker
+    Renders:
+      * header: title, optional description, color dot, three
+        Badges (difficulty / type / metric / status), start—end
+        date range
+      * Progress card: 4xl currentValue + targetValue + 2xl
+        percent + Progress bar + 'осталось N <unit> до цели' for
+        active challenges; status icon swaps by status
+        (CheckCircle2 / XCircle / Flag / Target)
+      * Chart card: <ChallengeProgressChart type, target, unit,
+        series, todayKey>
+      * Activities card: every in-period activity sorted desc by
+        date with type label / km / min / steps / pace / Strava
+        badge / note
+      * <ChallengeDetailActions challenge> bottom row
+- beatyourself/components/features/ChallengeProgressChart.tsx
+    'use client'. Custom SVG, no Recharts (project convention
+    from TASK-026/028/030 — 'без зависимости').
+    Mode switches by challenge.type:
+      * cumulative → fill-primary/15 area path + stroke-primary
+        line over series[i].cumulative; small circles per day
+        that scale up to r=4 on hover
+      * single_day → fill-primary bars per day with daily metric
+        value; bars wider when series is short
+    Common chrome:
+      * dashed emerald-500 target line with 'Цель X unit' label
+      * vertical dashed stroke-foreground/40 line at xFor(today)
+      * y-axis 3 ticks (0/mid/max where max =
+        max(target, peak)*1.1) — target line always inside plot
+      * month abbreviations 'янв'..'дек' with 48px minimum spacing
+      * hover layer: transparent rects (one per data point) that
+        set hoverIndex; footer shows 'DD месяц YYYY: VALUE unit'
+        when hovered, helper copy otherwise
+    Empty state when series is empty (degenerate period).
+- beatyourself/components/features/ChallengeDetailActions.tsx
+    'use client'. Action row:
+      * Edit — asChild Button > Link to /challenges/[id]/edit
+      * Archive — Dialog with 'Связанные активности останутся';
+        on confirm calls updateChallengeAction(id,
+        {status:'archived'}) + router.refresh
+      * Delete — destructive Dialog; on confirm calls
+        deleteChallengeAction(id) + router.push('/challenges') +
+        router.refresh
+    Dialogs gate onOpenChange by pending flag to block dismissal
+    mid-action; toast.success/error feedback via sonner (Toaster
+    mounted in (app)/layout.tsx by TASK-025).
+    Archive button hidden when challenge.status === 'archived'.
+
+What I modified:
+- beatyourself/lib/services/challenge-progress.ts
+    Added export buildDailySeries(challenge, activities) →
+    DailyProgressPoint[] and the matching DailyProgressPoint type.
+    Walks day-by-day from startDate to endDate inclusive in
+    86400000ms steps; buckets in-period activities by
+    toISOString().slice(0,10) UTC day-key (matches the existing
+    isInPeriod UTC-midnight @db.Date convention from TASK-019);
+    reuses sumByMetric for the daily aggregate so the metric→
+    field mapping stays in ONE place. Pure function, no I/O.
+- beatyourself/lib/services/challenge-progress.test.ts
+    Added 4 vitest cases for buildDailySeries.
+
+Why tests are added here (against architectural_principles
+"Тесты пишем ТОЛЬКО для streak calculation и token crypto"):
+TASK-019 itself carved out unit tests for calculateProgress
+(explicit acceptance criterion). buildDailySeries is the
+inverse-by-day variant with subtle date arithmetic — UTC
+bucketing, inclusive end, off-by-one risks at the boundary —
+and lives in the same pure module. Testing it here is consistent
+with TASK-019's bucket: pure date-arithmetic helpers without I/O.
+
+Tests added (lib/services/challenge-progress.test.ts):
+1. emits one point per day in [startDate, endDate] inclusive —
+   2026-04-10..2026-04-15 yields 6 dayKeys, all daily/cumulative
+   = 0 for empty activities.
+2. accumulates daily sums per metric for cumulative challenges —
+   mixed activities, expects daily=[5,0,10,0,0,2] and
+   cumulative=[5,5,15,15,15,17].
+3. treats out-of-period activities as zero — 100km on 2026-04-09
+   + 2026-04-16; only the in-period 4km on 2026-04-12 contributes;
+   final cumulative = 4.
+4. single_day type produces daily values regardless of
+   cumulative-vs-max semantics — buildDailySeries returns per-day
+   values; calculateProgress later applies MAX. Keeps contracts
+   crisp.
+
+Verification (all green from beatyourself/):
+- npm run typecheck            -> exit 0
+- npm run lint                 -> 0 errors, 2 pre-existing
+                                  warnings (ActivityForm.tsx:155
+                                  + ChallengeForm.tsx:172 — React
+                                  Compiler / react-hook-form
+                                  .watch() incompat, flagged in
+                                  TASK-014/018/023/024/025/030/
+                                  031/033/034/035 progress, NOT
+                                  introduced here)
+- npm test                     -> 48/48 (10 cipher + 16 streaks
+                                  + 22 progress, including 4 new
+                                  buildDailySeries cases)
+- npm run format:check         -> my new files clean; 2
+                                  pre-existing format warnings in
+                                  TASK-035 files I did NOT touch
+                                  (app/api/cron/strava-sync/route
+                                  .ts + lib/services/strava-sync
+                                  .ts) — out of scope
+
+Test_steps coverage (per PRD acceptance):
+1. "Открыть челлендж с прогрессом 50/100 — прогресс-бар на 50%"
+   pct = Math.min(100, Math.round(currentValue/targetValue*100));
+   for 50/100 = 50; <Progress value={50}/> renders at 50%.
+2. "График отображает накопление прогресса по дням"
+   cumulative: buildDailySeries iterates day-by-day inclusive,
+   cumulative path drawn as M..L..L over (xFor(i),
+   yFor(cumulative)). single_day: per-day bars at yFor(daily).
+3. "Активности отображаются и фильтруются по периоду челленджа"
+   listActivities {from:startDate, to:endDate} → gte/lte on
+   @db.Date — calendar-day-inclusive. Activities outside the
+   period never reach the page.
+
+HARNESS LIMITATION (consistent with TASK-013/014/015/023/024/
+025/026/028/030/031): the 3 PRD test_steps and the visual
+fidelity of the chart, progress card, badges, and dialogs need
+hand-eyeball verification. They require a real authed session +
+seeded DB + browser.
+
+## Notes for next iterations
+
+- TASK-037 (confetti, the only TASK-032-dependent task) is now
+  unblocked. Acceptance: install canvas-confetti, fire on first
+  open of a completed challenge — via ?just_completed=1 query
+  param OR sessionStorage keyed by challenge.id; respect
+  prefers-reduced-motion. The detail page already renders
+  completed challenges with CheckCircle2 + emerald status badge,
+  so confetti is purely additive.
+- pluralizeDays/pluralizeActivities now duplicated in 6 callsites
+  (ChallengeCard, StreakBlock, ActiveChallengesList,
+  ProfileArchive, ActivityHeatmap, this page). Extraction to
+  lib/utils/text-plural.ts is overdue; deferred per
+  "не делай попутный рефакторинг".
+- DIFFICULTY/STATUS/TYPE/METRIC label maps duplicated across
+  ChallengeCard, EditChallengeForm, ProfileArchive, this page —
+  consolidate to lib/utils/challenge-labels.ts when a 6th
+  callsite needs them.
+- For very long challenges (>180 days), single_day bars become
+  thin. Future polish could add horizontal scroll or aggregate to
+  weekly bars. Deferred.
+- The Edit/Archive/Delete trio overlaps with EditChallengeForm's
+  delete dialog (two callsites, slightly different layouts).
+  Extract to <ChallengeMutationDialogs> when a third consumer
+  appears.
+
+## Files touched this iteration
+
+NEW (staged for TASK-032 commit):
+  beatyourself/app/(app)/challenges/[id]/page.tsx
+  beatyourself/components/features/ChallengeProgressChart.tsx
+  beatyourself/components/features/ChallengeDetailActions.tsx
+
+MODIFIED (staged for TASK-032 commit):
+  beatyourself/lib/services/challenge-progress.ts
+  beatyourself/lib/services/challenge-progress.test.ts
+  tasks.json (TASK-032 status: pending → done + notes)
+  progress.txt (this block)
+
+PRE-EXISTING UNSTAGED (NOT touched, hands-off — same hands-off
+list as TASK-030/031/033/034/035):
+  README.md (deleted, untracked-state)
+  Problems.md (untracked)
+  beatyourself/components/layout/{BottomNav,Sidebar,nav-items}.{tsx,ts}
+  beatyourself/components/features/{ActiveChallengesList,
+    ActivityForm,ActivityHeatmap,WaterRing,WaterGoalForm,
+    WaterHistoryList,WaterChart,StravaDisconnectButton}.tsx
+  beatyourself/app/(app)/water/page.tsx
+  beatyourself/app/(app)/{dashboard,profile}/page.tsx
+  beatyourself/app/api/strava/{callback,connect}/
+  beatyourself/actions/{activities,water,strava}.ts
+  beatyourself/lib/strava/oauth.ts
+  beatyourself/lib/services/{water,weight,dashboard}.ts
+  beatyourself/lib/validation/{water,weight}.ts
+  beatyourself/package-lock.json
+  package-lock.json (repo root)
