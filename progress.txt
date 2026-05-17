@@ -5028,3 +5028,311 @@ as TASK-030/031/032/033/034/035/036):
   beatyourself/lib/validation/{water,weight}.ts
   beatyourself/package-lock.json
   package-lock.json (repo root)
+
+
+## 2026-05-17 — TASK-039: Sentry integration (client/server/edge) + PII scrubbing
+
+Status: done
+
+Why this task: of the 3 remaining "low"-priority pending
+tasks (037 confetti, 038 empty-states+errors, 039 Sentry),
+TASK-039 has the highest production value now that
+TASK-040 has shipped the deploy story. Without Sentry, any
+production exception is invisible — neither UptimeRobot
+(polls /api/health) nor Render's stdout capture surface
+silent server-action failures or client-side hydration
+errors. TASK-035/036/040 progress notes also explicitly
+flagged Sentry wiring as the standing follow-up. 037 is
+cosmetic and 038 is broad UX polish; both can wait until
+the operator has visibility into what's breaking.
+
+What I added (NEW files):
+- beatyourself/sentry.server.config.ts
+- beatyourself/sentry.edge.config.ts
+- beatyourself/sentry.client.config.ts
+    Three thin config files at the project root, exact
+    filenames required by the acceptance criterion.
+    Each guards Sentry.init with
+      `if (DSN && process.env.NODE_ENV !== 'development')`
+    so dev runs are silent and a missing DSN is a no-op.
+    Server + edge read env.SENTRY_DSN from @/config/env;
+    client reads process.env.NEXT_PUBLIC_SENTRY_DSN
+    directly (config/env has 'server-only' so it can't be
+    imported into the client bundle).
+    Init options: tracesSampleRate=0 (no perf tracing —
+    not in spec), sendDefaultPii=false (auto-PII would
+    contradict the beforeSend scrubbing requirement),
+    beforeSend=makeBeforeSend() (factory from
+    lib/sentry/scrub.ts).
+- beatyourself/instrumentation-client.ts
+    Next 16's canonical client-side entry per
+    node_modules/next/dist/docs/01-app/03-api-reference/
+    03-file-conventions/instrumentation-client.md.
+    Single line: `import "./sentry.client.config"`.
+    Runs after HTML loads, before React hydration, before
+    user interaction.
+- beatyourself/lib/sentry/scrub.ts
+    Pure PII scrubber, framework-agnostic, used by all 3
+    Sentry configs' beforeSend hooks.
+    - scrubString(input): replaces email addresses, Bearer
+      tokens, JWT-shaped strings (eyJ...), and long-hex
+      blobs (>=32 hex chars — covers NEXTAUTH_SECRET,
+      ENCRYPTION_KEY, CRON_SECRET, Strava access tokens)
+      with [redacted].
+    - scrubValue(key,value): recursive walk up to depth 6.
+      Returns [redacted] if the key matches any of:
+        authorization | cookie | set-cookie | x-csrf-token
+        | password | access[_-]?token | refresh[_-]?token
+        | encryption[_-]?key | cron[_-]?secret
+        | nextauth[_-]?secret | client[_-]?secret
+        | api[_-]?key | session | jwt
+        | (name|first|last|full|user|display)[_-]?name
+        | email | e[_-]?mail | user[_-]?email
+        | primary[_-]?email
+      String values get scrubString applied; arrays + objects
+      recurse.
+    - scrubEvent(event): runs on the full Sentry
+      ErrorEvent. Strips user.email/username/ip_address
+      while keeping user.id (the internal DB user UUID
+      we need for issue grouping). Redacts sensitive
+      request.headers by name. Empties request.cookies
+      entirely. Recursively scrubs request.data,
+      breadcrumbs[].data/message, extra, tags,
+      exception.values[].value, event.message.
+    - makeBeforeSend(): factory returning the beforeSend
+      function.
+- beatyourself/lib/sentry/scrub.test.ts
+    14 unit tests covering scrubString (email/JWT/hex/
+    Bearer + happy path) and scrubEvent (user.email +
+    username stripped while id preserved; ip_address
+    stripped; Authorization+Cookie headers redacted;
+    nested email/accessToken in request.data redacted;
+    breadcrumb message + data PII redacted; cookies
+    cleared; exception.values[].value emails redacted;
+    null/undefined passthrough; sensitive tag values).
+
+What I modified:
+- beatyourself/instrumentation.ts
+    register() now does:
+      if NEXT_RUNTIME='nodejs':
+        await import('./config/env')
+        await import('./sentry.server.config')
+      else if NEXT_RUNTIME='edge':
+        await import('./sentry.edge.config')
+    Plus: `export const onRequestError =
+      Sentry.captureRequestError`. Per Next 16 docs
+    (instrumentation.md line 96), onRequestError fires
+    for routeType in {render, route, action, proxy} — so
+    server-action errors, route-handler errors, and
+    server-component render errors all flow to Sentry.
+- .env.example (repo root)
+    Replaced the single commented SENTRY_DSN= with:
+      SENTRY_DSN= (server, validated by config/env.ts)
+      NEXT_PUBLIC_SENTRY_DSN= (client, inlined by Next at
+                                build time)
+    Both commented out by default. Documented that they
+    should be set to the same value.
+
+What I installed:
+- @sentry/nextjs@10.53.1 — added to dependencies in
+  beatyourself/package.json. 143 transitive deps. The
+  @sentry/nextjs README's wizard (`npx @sentry/wizard@latest -i nextjs`)
+  is the official setup path; I used the manual file-by-file
+  setup instead because the wizard would have also tried
+  to wrap next.config.ts with withSentryConfig + scaffold
+  a sample error route + ask interactive prompts about
+  source-map uploads — out of scope for TASK-039.
+
+## Design notes
+
+- Three thin config files, not one shared init() helper.
+  Matches the acceptance criterion's exact filename list
+  and the Sentry SDK wizard convention. Future operators
+  upgrading Sentry will find the file shape they expect.
+- Server/edge use env.SENTRY_DSN; client uses
+  process.env.NEXT_PUBLIC_SENTRY_DSN. Reason: config/env.ts
+  has `import "server-only"` (TASK-003) so it cannot be
+  imported into client bundles. Sentry DSNs are
+  conventionally treated as public (Sentry's docs say so
+  explicitly), so NEXT_PUBLIC_ exposure is safe.
+- NEXT_PUBLIC_SENTRY_DSN is intentionally NOT added to
+  config/env.ts's zod schema. Doing so would force the
+  client config to import the server-only env module.
+  The client config tolerates the var being unset (no-op).
+- Dev-mode disabling via NODE_ENV check at module load,
+  not via Sentry.init({enabled:false}). Reason: init has
+  side effects (it registers global error handlers,
+  patches fetch); guarding the call entirely is cleaner.
+- onRequestError = Sentry.captureRequestError directly,
+  no adapter. Sentry's export has the exact onRequestError
+  signature documented at node_modules/.../instrumentation.md
+  line 96.
+- Did NOT wrap next.config.ts with withSentryConfig. That
+  wrapper's main features (source-map upload, tunnel
+  route) require SENTRY_AUTH_TOKEN + Sentry org/project
+  setup. Out of scope. Operator can add later.
+- tracesSampleRate=0. TASK-039 spec doesn't mention
+  performance tracing; sampling all traces would add
+  noticeable per-request overhead and quota burn on the
+  free Sentry tier.
+- sendDefaultPii=false. Sentry's default would auto-attach
+  user.email + ip_address to events — diametrically
+  opposed to the beforeSend scrubbing requirement.
+  Belt-and-suspenders: even if the operator flips this to
+  true, the scrubber still strips PII before send.
+- Scrubber acts at THREE layers in defense-in-depth:
+  (1) structural pruning — user.email/username/ip_address
+      removed entirely from the User object.
+  (2) key-name pattern — any object key matching
+      SENSITIVE_KEY_PATTERN / NAME_KEY_PATTERN /
+      EMAIL_KEY_PATTERN gets its value replaced with
+      [redacted].
+  (3) string-content pattern — any string anywhere in the
+      event (after recursion) gets scanned for email/JWT/
+      hex/Bearer and those substrings get redacted.
+  So a token logged with a non-sensitive key name still
+  gets caught by the string pattern; an email embedded in
+  a free-text error message still gets caught even though
+  the surrounding object had no "email" key.
+- MAX_DEPTH=6 on the recursive scrub guards against
+  pathological deeply nested payloads.
+- scrubEvent is exported separately from makeBeforeSend
+  so unit tests can call it directly without going through
+  the factory. scrubString and scrubValue are also
+  exported for the same reason.
+
+## Verification
+
+- npm run typecheck — clean (0 errors)
+- npm run lint — 0 errors. Only the 2 pre-existing
+  react-hook-form .watch() warnings on ActivityForm.tsx:155
+  + ChallengeForm.tsx:172 (flagged in TASK-031/033/034/
+  035/036/040 notes). NOT introduced by this task.
+- npm test — 62/62 passed (48 pre-existing + 14 new from
+  scrub.test.ts). No regressions.
+- npm run build with shell-overridden placeholder env —
+  Compiled successfully; all 18 routes registered
+  (○ / + ○ /_not-found + ○ /ui-test + 15 dynamic incl.
+  /api/auth/[...nextauth] /api/health /api/cron/* /api/
+  strava/* /dashboard /challenges/* /login /profile
+  /water /weight). No Sentry warnings because DSN unset.
+
+## Harness limitation
+
+Cannot live-exec the 3 PRD test_steps without a real
+Sentry organization + DSN. Code-review proxies:
+
+- test_step 1 ('Бросить тестовую ошибку в server action
+  → событие появляется в Sentry dashboard'): instrumentation.ts
+  exports `onRequestError = Sentry.captureRequestError`.
+  Per Next 16 docs (node_modules/next/dist/docs/01-app/
+  03-api-reference/03-file-conventions/instrumentation.md
+  line 96), onRequestError fires for `routeType: 'action'`.
+  With a real SENTRY_DSN set and NODE_ENV=production, any
+  throw from a server action will hit Sentry.captureRequestError
+  → the configured Sentry client → the network.
+- test_step 2 ('Проверить event: email и токены не
+  присутствуют в payload'): 14 unit tests in scrub.test.ts
+  assert this end-to-end on synthetic ErrorEvents shaped
+  like real Sentry payloads (user.email + username
+  stripped while id preserved; Authorization + Cookie
+  headers → [redacted]; nested email + accessToken
+  fields in request.data → [redacted]; emails embedded
+  in breadcrumb messages + exception.values[].value →
+  [redacted]). The same beforeSend hook fires server-side
+  before the event leaves the process.
+- test_step 3 ('В dev режиме — события не отправляются'):
+  all three configs gate Sentry.init with
+  `process.env.NODE_ENV !== 'development'`. In dev, init
+  never runs, the Sentry client is in 'undefined' state,
+  captureRequestError becomes a no-op.
+
+The operator must set both SENTRY_DSN and
+NEXT_PUBLIC_SENTRY_DSN to the same Sentry-issued DSN
+in Render's env, then trigger a test error
+(e.g. `throw new Error('sentry-test')` inside an existing
+server action) to fully sign off the live path.
+
+## Notes for next iterations
+
+- TASK-035 (strava-sync cron) progress note flagged:
+  "Sentry capture is intentionally NOT wired here:
+  @sentry/nextjs isn't installed yet". That's no longer
+  true. A future polish task can replace console.error
+  in app/api/cron/strava-sync/route.ts with
+    Sentry.captureException(err, {
+      tags: { route: 'cron/strava-sync', userId },
+    })
+  — the context shape (userId, fetched, upserted, pages,
+  reason) is already standardized. Same applies to
+  app/api/health/route.ts (TASK-040): the catch arm's
+  console.error can be paired with Sentry.captureException
+  for DB-down alerting. Neither is part of TASK-039's
+  scope (per "не делай попутный рефакторинг").
+- TASK-038 (empty states + global error UX, last UI
+  pending task): when app/(app)/error.tsx is added,
+  wrap with Sentry.ErrorBoundary or call
+  Sentry.captureException(error) inside so client-side
+  error-boundary fires also reach Sentry.
+- TASK-037 (confetti, last UI pending task): unaffected.
+- If the operator wants source-map uploads in production
+  builds (so Sentry stack traces show original TypeScript
+  line numbers instead of minified bundle output), wrap
+  next.config.ts with
+    withSentryConfig(nextConfig, {
+      silent: !env.CI, org: 'your-org',
+      project: 'beatyourself'
+    })
+  and add SENTRY_AUTH_TOKEN to .env.example.
+- NEXT_PUBLIC_SENTRY_DSN duplicates SENTRY_DSN by design.
+  Collapsing requires withSentryConfig auto-injection —
+  optional follow-up.
+- npm audit after install: 4 moderate + 1 high
+  advisories in @sentry/opentelemetry-* and form-data
+  transitive chains. No exploitable surface in this app
+  (no untrusted form-data through Sentry). Re-run
+  `npm audit fix` later when Sentry publishes updates.
+- Scrubber MAX_DEPTH=6 is conservative; if a real payload
+  ever needs deeper traversal, bump the constant.
+- The 'name' key-name pattern is broad — it'll redact
+  any object property literally named `name`. False
+  positives possible (e.g. error.name='TypeError' might
+  become '[redacted]' if it lands in event.extra rather
+  than event.exception.values[].type). Acceptable trade-off
+  for PII safety; can be tightened later.
+
+## Files touched this iteration
+
+NEW (staged for TASK-039 commit):
+  beatyourself/sentry.server.config.ts
+  beatyourself/sentry.edge.config.ts
+  beatyourself/sentry.client.config.ts
+  beatyourself/instrumentation-client.ts
+  beatyourself/lib/sentry/scrub.ts
+  beatyourself/lib/sentry/scrub.test.ts
+
+MODIFIED (staged for TASK-039 commit):
+  beatyourself/instrumentation.ts
+  beatyourself/package.json (added @sentry/nextjs)
+  beatyourself/package-lock.json (deps)
+  .env.example (added Sentry section)
+  tasks.json (TASK-039 status: pending → done + notes)
+  progress.txt (this block)
+
+PRE-EXISTING UNSTAGED (NOT touched, hands-off — same
+list as TASK-030/031/032/033/034/035/036/040):
+  README.md (deleted, untracked-state)
+  Problems.md (untracked)
+  beatyourself/components/layout/{BottomNav,Sidebar,
+    nav-items}.{tsx,ts}
+  beatyourself/components/features/{ActiveChallengesList,
+    ActivityForm,ActivityHeatmap,WaterRing,WaterGoalForm,
+    WaterHistoryList,WaterChart,StravaDisconnectButton}.tsx
+  beatyourself/app/(app)/water/page.tsx
+  beatyourself/app/(app)/dashboard/page.tsx
+  beatyourself/app/api/strava/{callback,connect}/
+  beatyourself/actions/{activities,water}.ts
+  beatyourself/lib/strava/oauth.ts
+  beatyourself/lib/services/{water,weight,dashboard}.ts
+  beatyourself/lib/validation/{water,weight}.ts
+  package-lock.json (repo root)
