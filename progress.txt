@@ -5336,3 +5336,255 @@ list as TASK-030/031/032/033/034/035/036/040):
   beatyourself/lib/services/{water,weight,dashboard}.ts
   beatyourself/lib/validation/{water,weight}.ts
   package-lock.json (repo root)
+
+
+## 2026-05-17 — TASK-038: Empty states + global error UX
+
+Status: done
+
+Why this task: TASK-038 was the last remaining "low"-
+priority pending task and the only pending task in
+tasks.json with all dependencies (TASK-028 water,
+TASK-030 weight, TASK-031 profile) green. Spec asks for
+a reusable EmptyState component, app/(app)/error.tsx +
+not-found.tsx boundaries, and a sweep to ensure server
+actions return toast-shown errors (the last already
+true pre-TASK-038).
+
+What I added (NEW files):
+- beatyourself/components/ui/EmptyState.tsx
+    Reusable empty-state primitive. Props match the spec
+    (icon, title, description, action) plus optional
+    className + size ("default" | "compact"). The
+    "compact" variant has smaller padding (px-4 py-10)
+    and a smaller icon (size-8) so it fits inside cards
+    and tab panels; "default" is for full-page empties
+    (px-6 py-16, size-10). Renders role="status" so SR
+    users hear it as a polite status region, not as a
+    heading. Description accepts ReactNode so consumers
+    can mix inline elements (e.g. error.digest <span>
+    in error.tsx).
+- beatyourself/app/(app)/error.tsx
+    Client error boundary per Next 16.2's contract:
+      props { error: Error & { digest?: string };
+              unstable_retry: () => void }
+    unstable_retry is the Next 16.2+ replacement for the
+    legacy reset prop (per
+      node_modules/next/dist/docs/01-app/03-api-reference/
+      03-file-conventions/error.md line 117).
+    Calls Sentry.captureException(error) inside useEffect.
+    Sentry.init is a no-op in dev (TASK-039 gate), so
+    this is safe to call unconditionally. error.digest
+    is shown as a monospace ID line when present so the
+    operator can match the client display to server
+    logs. Two CTAs: "Попробовать снова" → unstable_retry();
+    "На главную" → <Link href="/dashboard">.
+- beatyourself/app/(app)/not-found.tsx
+    Server component rendered by the Next router when
+    notFound() (from next/navigation) is thrown inside
+    the (app) route group. Active caller:
+      app/(app)/challenges/[id]/page.tsx line 135
+        (if (!challenge) notFound();)
+    Friendly 404 with Compass icon and "На главную" CTA.
+
+What I modified (to use the new EmptyState):
+- beatyourself/app/(app)/challenges/page.tsx
+    Replaced the local EmptyState() helper (former lines
+    71-85) and EmptyTabState() helper (former lines
+    87-98) with calls to the shared <EmptyState />.
+    Main empty uses default size + Sparkles icon. Active
+    tab empty: compact size + Sparkles + outline CTA.
+    Archive tab empty: compact size + Archive icon,
+    no CTA.
+- beatyourself/components/features/ActiveChallengesList.tsx
+    Deleted the local EmptyState() helper. The empty
+    branch now renders the section h2 + a compact
+    EmptyState with Sparkles icon and the "Создать?"
+    outline CTA. h2 preserved (dashboard relies on the
+    section heading for visual rhythm).
+- beatyourself/components/features/WaterHistoryList.tsx
+    Replaced the bare <p>Сегодня записей о воде пока
+    нет.</p> with a compact EmptyState (Droplet icon).
+- beatyourself/components/features/WeightHistoryList.tsx
+    Replaced the bare <p>Записей о весе пока нет.</p>
+    with a compact EmptyState (Scale icon).
+- beatyourself/components/features/ProfileArchive.tsx
+    Deleted the EmptyArchiveState() helper. Both tab
+    empties now use compact EmptyState: Award icon for
+    "completed" (with motivational description), Archive
+    icon for "failed" (no description — the absence of
+    failures is the message).
+
+## Design notes
+
+- EmptyState lives in components/ui/ (not features/)
+  because it's a presentational primitive with no
+  business semantics — matches the shadcn folder
+  convention used for button/card/dialog/etc.
+- size prop is binary, not freeform. "default" + "compact"
+  covers every consumer today; adding a third density
+  later is a one-line change to the cn() helper.
+- role="status" on the wrapping div means SR users hear
+  it as a polite region (aria-live=polite implicit). An
+  empty list isn't an error or a warning — it's a state
+  we want to communicate without interrupting.
+- error.tsx imports @sentry/nextjs unconditionally. The
+  package's client entry is tree-shaken (only the bits
+  actually called survive), and the file is only loaded
+  on the error path. No measurable cold-start hit.
+- error.tsx does NOT pass tags/extra to
+  Sentry.captureException — TASK-039's onRequestError
+  already groups server-side render errors by route;
+  the client error boundary catches what slipped past
+  hydration. Sentry's automatic context (URL, breadcrumbs,
+  user agent) is sufficient grouping signal here.
+- not-found.tsx is a server component, not a client. No
+  interactivity is needed beyond the Link, and keeping
+  it server-rendered avoids shipping any JS for the
+  most-common 404 surface (typo'd URL, bot probe).
+- Did NOT add a global app/not-found.tsx for unmatched
+  URLs outside the (app) group. The (app) group's
+  not-found only fires when notFound() is thrown inside
+  a route in the group (e.g. /challenges/invalid-id).
+  A typo'd URL like /random-url falls through to Next's
+  default 404 chrome. For an internal invited-email
+  app this is fine; the operator can add app/not-found.tsx
+  or app/global-not-found.tsx later if needed.
+- Server action error path (acceptance criterion 4) was
+  ALREADY satisfied pre-TASK-038. Every action file
+  (actions/{activities,challenges,water,weight,profile,
+  strava}.ts) returns ActionResult<T>={success,error},
+  and every consumer (ActivityForm, ChallengeForm,
+  WaterGoalForm, WaterHistoryList, WeightForm,
+  WeightHistoryList, WeightTargetForm,
+  ChallengeDetailActions, EditChallengeForm,
+  StravaSection, StravaDisconnectButton) calls
+  toast.error(result.error) on !success branches.
+  Toaster is mounted in app/(app)/layout.tsx. No
+  changes needed to the action layer.
+- ActivityHeatmap is intentionally NOT migrated to
+  EmptyState: when totalActivities=0 it still renders
+  the muted grid, which IS the visual empty state for
+  a calendar/heatmap (replacing it with text would
+  break the established idiom).
+
+## Verification
+
+- npm run typecheck — clean (0 errors).
+- npm run lint — 0 errors, 2 warnings. The two warnings
+  are pre-existing react-hook-form .watch() compiler
+  hints on ActivityForm.tsx:155 + ChallengeForm.tsx:172,
+  flagged in TASK-031/033/034/035/036/037/039/040 notes.
+  NOT introduced by this task.
+- npm test — 62/62 passed (4 files: cipher, streaks,
+  progress, sentry-scrub). No new tests added per
+  architectural_principles "Тесты пишем ТОЛЬКО для
+  streak calculation и token crypto. CRUD не покрываем
+  unit-тестами" — EmptyState is a presentational
+  primitive, error.tsx + not-found.tsx are framework-
+  invoked boundaries.
+
+## Harness limitation
+
+Cannot live-exec the 3 PRD test_steps without browser
+interaction. Code-review proxies:
+
+- test_step 1 ("Открыть все страницы с пустой БД —
+  везде empty states"): EmptyState now wires every
+  surface listed in acceptance criterion 1 —
+    * пустой список челленджей →
+      app/(app)/challenges/page.tsx main + active-tab,
+      plus components/features/ActiveChallengesList.tsx
+      on the dashboard.
+    * пустая история воды →
+      components/features/WaterHistoryList.tsx
+      (Droplet icon, compact).
+    * пустая история веса →
+      components/features/WeightHistoryList.tsx
+      (Scale icon, compact).
+    * пустой архив →
+      app/(app)/challenges/page.tsx archive-tab branch,
+      plus components/features/ProfileArchive.tsx
+      completed/failed tabs.
+- test_step 2 ("Симулировать ошибку в server action →
+  отображается toast"): wired pre-TASK-038 across
+  every form/action consumer (toast.error on !success).
+  The new error.tsx covers the render-path throw arm;
+  both paths are now covered.
+- test_step 3 ("Открыть несуществующий
+  /challenges/invalid-id → 404 страница"):
+  app/(app)/challenges/[id]/page.tsx line 135 calls
+  notFound() when getChallenge returns null; Next 16
+  renders app/(app)/not-found.tsx instead of the
+  framework default.
+
+Operator must hand-eyeball /dashboard, /challenges,
+/water, /weight, /profile (archive tabs) with an empty
+DB to sign off the visual presentation; throw inside
+any server-component render path to verify error.tsx;
+visit /challenges/<random-id> while authed to verify
+not-found.tsx.
+
+## Notes for next iterations
+
+- All 40 tasks (TASK-001 through TASK-040) are now
+  status:done in tasks.json. The MVP is complete by
+  the file's own definition.
+- If the operator wants a global 404 for unmatched URLs
+  outside (app), add app/not-found.tsx (server component,
+  root layout wraps it — no html/body wrap needed) or
+  enable experimental.globalNotFound + write
+  app/global-not-found.tsx (must include html+body).
+  Out of TASK-038's scope.
+- The dashboard's ActivityHeatmap has no explicit
+  EmptyState — it shows the grid of muted cells. If a
+  future task wants an explicit "Нет активностей за
+  90 дней" message, that's a small change at line ~210
+  of ActivityHeatmap.tsx, but would break the
+  established calendar/heatmap visual idiom.
+- error.tsx is at the (app) layer; a typo'd URL outside
+  (app) won't hit it. The (auth) route group has no
+  error boundary either — if /login throws, the user
+  sees Next's default error UI. Adding
+  app/(auth)/error.tsx is a one-file follow-up;
+  deferred because /login is static and unlikely to
+  throw.
+- AGENTS.md respected: read
+  node_modules/next/dist/docs/01-app/03-api-reference/
+  03-file-conventions/error.md before writing error.tsx
+  to confirm unstable_retry is the Next 16.2+ contract
+  (replacing the legacy reset prop seen in older docs).
+
+## Files touched this iteration
+
+NEW (staged for TASK-038 commit):
+  beatyourself/components/ui/EmptyState.tsx
+  beatyourself/app/(app)/error.tsx
+  beatyourself/app/(app)/not-found.tsx
+
+MODIFIED (staged for TASK-038 commit):
+  beatyourself/app/(app)/challenges/page.tsx
+  beatyourself/components/features/ActiveChallengesList.tsx
+  beatyourself/components/features/WaterHistoryList.tsx
+  beatyourself/components/features/WeightHistoryList.tsx
+  beatyourself/components/features/ProfileArchive.tsx
+  tasks.json (TASK-038 status: pending → done + notes)
+  progress.txt (this block)
+
+PRE-EXISTING UNSTAGED (NOT touched, hands-off — same
+list as prior iterations):
+  README.md (deleted, untracked-state)
+  Problems.md (untracked)
+  beatyourself/components/layout/{BottomNav,Sidebar,
+    nav-items}.{tsx,ts}
+  beatyourself/components/features/{ActivityForm,
+    ActivityHeatmap,WaterRing,WaterGoalForm,WaterChart,
+    StravaDisconnectButton}.tsx
+  beatyourself/app/(app)/water/page.tsx
+  beatyourself/app/(app)/dashboard/page.tsx
+  beatyourself/app/api/strava/{callback,connect}/
+  beatyourself/actions/{activities,water}.ts
+  beatyourself/lib/strava/oauth.ts
+  beatyourself/lib/services/{water,weight,dashboard}.ts
+  beatyourself/lib/validation/{water,weight}.ts
+  package-lock.json (repo root)

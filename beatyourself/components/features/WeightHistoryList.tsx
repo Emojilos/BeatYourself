@@ -1,11 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { Trash2 } from "lucide-react";
+import { Scale, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { deleteWeightAction } from "@/actions/weight";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/EmptyState";
 
 export interface WeightHistoryRow {
   id: string;
@@ -65,7 +66,14 @@ export function WeightHistoryList({ logs }: WeightHistoryListProps) {
   }
 
   if (visibleLogs.length === 0) {
-    return <p className="text-muted-foreground text-sm">Записей о весе пока нет.</p>;
+    return (
+      <EmptyState
+        size="compact"
+        icon={Scale}
+        title="Записей о весе пока нет."
+        description="Добавь первое измерение в форме выше."
+      />
+    );
   }
 
   return (

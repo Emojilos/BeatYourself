@@ -1,10 +1,11 @@
 import Link from "next/link";
 import type { Challenge } from "@prisma/client";
-import { Plus, Sparkles } from "lucide-react";
+import { Archive, Plus, Sparkles } from "lucide-react";
 
 import { ChallengeCard } from "@/components/features/ChallengeCard";
 import { ChallengesTabs } from "@/components/features/ChallengesTabs";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { requireSession } from "@/lib/auth/session";
 import { listChallenges } from "@/lib/services/challenges";
 
@@ -33,21 +34,42 @@ export default async function ChallengesPage() {
       </header>
 
       {all.length === 0 ? (
-        <EmptyState />
+        <EmptyState
+          icon={Sparkles}
+          title="Пока нет челленджей."
+          description="Поставь первую цель!"
+          action={
+            <Button asChild>
+              <Link href="/challenges/new">
+                <Plus />
+                Создать челлендж
+              </Link>
+            </Button>
+          }
+        />
       ) : (
         <ChallengesTabs
           activeCount={active.length}
           archiveCount={archive.length}
           active={
             active.length === 0 ? (
-              <EmptyTabState message="Нет активных челленджей." withCta />
+              <EmptyState
+                size="compact"
+                icon={Sparkles}
+                title="Нет активных челленджей."
+                action={
+                  <Button asChild variant="outline" size="sm">
+                    <Link href="/challenges/new">Создать челлендж</Link>
+                  </Button>
+                }
+              />
             ) : (
               <ChallengeGrid items={active} />
             )
           }
           archive={
             archive.length === 0 ? (
-              <EmptyTabState message="Архив пока пуст." />
+              <EmptyState size="compact" icon={Archive} title="Архив пока пуст." />
             ) : (
               <ChallengeGrid items={archive} />
             )
@@ -64,35 +86,6 @@ function ChallengeGrid({ items }: { items: Challenge[] }) {
       {items.map((challenge) => (
         <ChallengeCard key={challenge.id} challenge={challenge} />
       ))}
-    </div>
-  );
-}
-
-function EmptyState() {
-  return (
-    <div className="bg-card rounded-xl border border-dashed py-16 text-center">
-      <Sparkles className="text-muted-foreground/60 mx-auto mb-4 size-10" />
-      <p className="text-base font-medium">Пока нет челленджей.</p>
-      <p className="text-muted-foreground mt-1 text-sm">Поставь первую цель!</p>
-      <Button asChild className="mt-6">
-        <Link href="/challenges/new">
-          <Plus />
-          Создать челлендж
-        </Link>
-      </Button>
-    </div>
-  );
-}
-
-function EmptyTabState({ message, withCta = false }: { message: string; withCta?: boolean }) {
-  return (
-    <div className="rounded-xl border border-dashed py-12 text-center">
-      <p className="text-muted-foreground text-sm">{message}</p>
-      {withCta ? (
-        <Button asChild variant="outline" size="sm" className="mt-4">
-          <Link href="/challenges/new">Создать челлендж</Link>
-        </Button>
-      ) : null}
     </div>
   );
 }

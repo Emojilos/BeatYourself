@@ -2,11 +2,12 @@
 
 import { useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Award, Filter, XCircle } from "lucide-react";
+import { Archive, Award, Filter, XCircle } from "lucide-react";
 import type { Challenge, Difficulty } from "@prisma/client";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 
@@ -126,7 +127,12 @@ export function ProfileArchive({
         </TabsList>
         <TabsContent value="completed" className="mt-4">
           {completed.length === 0 ? (
-            <EmptyArchiveState label="Завершённых челленджей пока нет." />
+            <EmptyState
+              size="compact"
+              icon={Award}
+              title="Завершённых челленджей пока нет."
+              description="Дойди до цели — и медаль появится здесь."
+            />
           ) : (
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {completed.map((c) => (
@@ -137,7 +143,11 @@ export function ProfileArchive({
         </TabsContent>
         <TabsContent value="failed" className="mt-4">
           {failed.length === 0 ? (
-            <EmptyArchiveState label="Проваленных челленджей нет." />
+            <EmptyState
+              size="compact"
+              icon={Archive}
+              title="Проваленных челленджей нет."
+            />
           ) : (
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
               {failed.map((c) => (
@@ -224,10 +234,3 @@ function FailedChallengeCard({ challenge }: { challenge: Challenge }) {
   );
 }
 
-function EmptyArchiveState({ label }: { label: string }) {
-  return (
-    <div className="bg-card rounded-xl border border-dashed py-10 text-center">
-      <p className="text-muted-foreground text-sm">{label}</p>
-    </div>
-  );
-}
