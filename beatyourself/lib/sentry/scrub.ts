@@ -106,9 +106,7 @@ export function scrubEvent<E extends ErrorEvent | null | undefined>(event: E): E
     event.breadcrumbs = event.breadcrumbs.map((crumb) => ({
       ...crumb,
       message: crumb.message ? scrubString(crumb.message) : crumb.message,
-      data: crumb.data
-        ? (scrubValue("data", crumb.data) as Record<string, unknown>)
-        : crumb.data,
+      data: crumb.data ? (scrubValue("data", crumb.data) as Record<string, unknown>) : crumb.data,
     }));
   }
 
@@ -119,11 +117,7 @@ export function scrubEvent<E extends ErrorEvent | null | undefined>(event: E): E
   if (event.tags) {
     const next: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(event.tags)) {
-      if (
-        SENSITIVE_KEY_PATTERN.test(k) ||
-        EMAIL_KEY_PATTERN.test(k) ||
-        NAME_KEY_PATTERN.test(k)
-      ) {
+      if (SENSITIVE_KEY_PATTERN.test(k) || EMAIL_KEY_PATTERN.test(k) || NAME_KEY_PATTERN.test(k)) {
         next[k] = REDACTED;
       } else if (typeof v === "string") {
         next[k] = scrubString(v);
@@ -148,9 +142,6 @@ export function scrubEvent<E extends ErrorEvent | null | undefined>(event: E): E
   return event;
 }
 
-export function makeBeforeSend(): (
-  event: ErrorEvent,
-  hint: EventHint,
-) => ErrorEvent | null {
+export function makeBeforeSend(): (event: ErrorEvent, hint: EventHint) => ErrorEvent | null {
   return (event) => scrubEvent(event);
 }

@@ -9,9 +9,7 @@ function makeEvent(overrides: Partial<ErrorEvent> = {}): ErrorEvent {
 
 describe("scrubString", () => {
   it("redacts email addresses in free text", () => {
-    expect(scrubString("contact alice@example.com please")).toBe(
-      "contact [redacted] please",
-    );
+    expect(scrubString("contact alice@example.com please")).toBe("contact [redacted] please");
   });
 
   it("redacts JWT-shaped tokens", () => {
@@ -25,9 +23,7 @@ describe("scrubString", () => {
   });
 
   it("redacts Bearer headers", () => {
-    expect(scrubString("Authorization: Bearer abc123xyz")).toContain(
-      "Bearer [redacted]",
-    );
+    expect(scrubString("Authorization: Bearer abc123xyz")).toContain("Bearer [redacted]");
   });
 
   it("leaves non-sensitive strings untouched", () => {

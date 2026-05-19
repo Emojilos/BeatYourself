@@ -4,6 +4,7 @@ import { differenceInCalendarDays } from "date-fns";
 import { CheckCircle2, ChevronLeft, Flag, Target, XCircle } from "lucide-react";
 import type { Activity, Challenge } from "@prisma/client";
 
+import { ChallengeCompletionConfetti } from "@/components/features/ChallengeCompletionConfetti";
 import { ChallengeDetailActions } from "@/components/features/ChallengeDetailActions";
 import { ChallengeProgressChart } from "@/components/features/ChallengeProgressChart";
 import { Badge } from "@/components/ui/badge";
@@ -159,6 +160,9 @@ export default async function ChallengeDetailPage({ params }: ChallengeDetailPag
 
   return (
     <main className="container mx-auto max-w-3xl space-y-6 p-4 sm:p-6">
+      {challenge.status === "completed" ? (
+        <ChallengeCompletionConfetti challengeId={challenge.id} />
+      ) : null}
       <header className="space-y-3">
         <Link
           href="/challenges"

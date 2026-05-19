@@ -10,3 +10,13 @@ export const logWeightSchema = z.object({
 });
 
 export type LogWeightInput = z.infer<typeof logWeightSchema>;
+
+export const setWeightTargetSchema = z.object({
+  weightKg: z
+    .number({ error: "Target weight must be a number" })
+    .positive("Target weight must be greater than zero")
+    .lt(500, "Target weight must be less than 500 kg"),
+  targetDate: z.coerce.date().optional(),
+});
+
+export type SetWeightTargetInput = z.infer<typeof setWeightTargetSchema>;

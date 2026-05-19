@@ -1,6 +1,6 @@
 import "server-only";
 
-import type { WaterLog } from "@prisma/client";
+import type { UserSettings, WaterLog } from "@prisma/client";
 
 import { prisma } from "@/lib/db/prisma";
 import { DEFAULT_USER_TZ } from "@/lib/services/streaks";
@@ -8,6 +8,8 @@ import { formatUserTzDayKey, shiftDayKey, userTzDayBounds } from "@/lib/utils/da
 import { fromZonedTime } from "date-fns-tz";
 
 const DEFAULT_WATER_GOAL_ML = 2000;
+export const MIN_WATER_GOAL_ML = 100;
+export const MAX_WATER_GOAL_ML = 20000;
 
 export interface TodayWater {
   consumed: number;
@@ -82,4 +84,29 @@ export async function deleteWater(userId: string, id: string): Promise<WaterLog 
   const existing = await prisma.waterLog.findFirst({ where: { id, userId } });
   if (!existing) return null;
   return prisma.waterLog.delete({ where: { id } });
+}
+
+export async function listWaterToday(
+  userId: string,
+  tz: string = DEFAULT_USER_TZ,
+  now: Date = new Date(),
+): Promise<WaterLog[]> {
+  const { start, end } = userTzDayBounds(now, tz);
+  return prisma.waterLog.findMany({
+    where: { userId, loggedAt: { gte: start, lt: end } },
+    orderBy: { loggedAt: "desc" },
+  });
+}
+
+export async function setWaterGoal(userId: string, goalMl: number): Promise<UserSettings> {
+  if (!Number.isInteger(goalMl) || goalMl < MIN_WATER_GOAL_ML || goalMl > MAX_WATER_GOAL_ML) {
+    throw new Error(
+      `Daily water goal must be an integer between ${MIN_WATER_GOAL_ML} and ${MAX_WATER_GOAL_ML} ml`,
+    );
+  }
+  return prisma.userSettings.upsert({
+    where: { userId },
+    update: { waterDailyGoalMl: goalMl },
+    create: { userId, waterDailyGoalMl: goalMl },
+  });
 }

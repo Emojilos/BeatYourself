@@ -1,14 +1,19 @@
 import "server-only";
 
-import type { WeightLog } from "@prisma/client";
+import type { UserSettings, WeightLog } from "@prisma/client";
 
 import { prisma } from "@/lib/db/prisma";
-import type { LogWeightInput } from "@/lib/validation/weight";
+import type { LogWeightInput, SetWeightTargetInput } from "@/lib/validation/weight";
 
 export interface LatestWeight {
   value: number;
   delta: number | null;
   measuredAt: Date;
+}
+
+export interface WeightTarget {
+  weightKg: number;
+  targetDate: Date | null;
 }
 
 export async function logWeight(userId: string, input: LogWeightInput): Promise<WeightLog> {
@@ -62,6 +67,39 @@ export async function deleteWeight(userId: string, id: string): Promise<WeightLo
   const existing = await prisma.weightLog.findFirst({ where: { id, userId } });
   if (!existing) return null;
   return prisma.weightLog.delete({ where: { id } });
+}
+
+export async function getWeightTarget(userId: string): Promise<WeightTarget | null> {
+  const settings = await prisma.userSettings.findUnique({
+    where: { userId },
+    select: { weightTargetKg: true, weightTargetDate: true },
+  });
+  if (!settings?.weightTargetKg) return null;
+  return {
+    weightKg: settings.weightTargetKg,
+    targetDate: settings.weightTargetDate ?? null,
+  };
+}
+
+export async function setWeightTarget(
+  userId: string,
+  input: SetWeightTargetInput,
+): Promise<UserSettings> {
+  const targetDate = input.targetDate ? toUtcMidnight(input.targetDate) : null;
+  return prisma.userSettings.upsert({
+    where: { userId },
+    update: { weightTargetKg: input.weightKg, weightTargetDate: targetDate },
+    create: { userId, weightTargetKg: input.weightKg, weightTargetDate: targetDate },
+  });
+}
+
+export async function clearWeightTarget(userId: string): Promise<UserSettings | null> {
+  const existing = await prisma.userSettings.findUnique({ where: { userId } });
+  if (!existing) return null;
+  return prisma.userSettings.update({
+    where: { userId },
+    data: { weightTargetKg: null, weightTargetDate: null },
+  });
 }
 
 function toUtcMidnight(date: Date): Date {
